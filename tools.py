@@ -41,7 +41,15 @@ def read_file(path: str) -> str:
     p = _resolve(path)
     if not p.exists():
         return f"[error] File not found: {path}"
-    return p.read_text(encoding="utf-8", errors="replace")[:60_000]
+    content = p.read_text(encoding="utf-8", errors="replace")
+    limit = 60_000
+    if len(content) > limit:
+        total = len(content)
+        content = content[:limit] + (
+            f"\n\n⚠️ OUTPUT TRUNCATED: showing {limit} of {total} characters. "
+            f"Use run_bash with head/tail/sed to read specific sections."
+        )
+    return content
 
 
 def read_skill_file(path: str) -> str:
@@ -93,7 +101,12 @@ def run_bash(command: str, timeout: int = 120) -> str:
         )
         output = (result.stdout + "\n" + result.stderr).strip()
         if len(output) > 30_000:
-            output = output[:15_000] + "\n...(truncated)...\n" + output[-15_000:]
+            total = len(output)
+            output = (
+                output[:15_000]
+                + f"\n\n⚠️ OUTPUT TRUNCATED: showing 30000 of {total} characters (first 15k + last 15k).\n\n"
+                + output[-15_000:]
+            )
         return output or "(no output)"
     except subprocess.TimeoutExpired:
         return f"[error] Command timed out after {timeout}s"

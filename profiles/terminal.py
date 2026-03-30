@@ -10,13 +10,30 @@ Key constraints:
 Optimization strategy:
   - Lightweight planner: 1 tool call max, just write a quick plan
   - No contract negotiation: tasks are already well-specified
-  - Builder gets most of the time budget
+  - Builder gets most of the time budget with env bootstrapping
+  - Builder does self-verification before finishing (enforced)
   - Evaluator is quick self-check, 1 round only
   - If first round passes, done. If not, builder gets one retry.
 """
 from __future__ import annotations
 
 from profiles.base import BaseProfile, AgentConfig
+
+# Commands to bootstrap environment awareness at the start of each build.
+# Output is injected as context so the model doesn't waste time exploring.
+ENV_BOOTSTRAP_COMMANDS = [
+    "uname -a",
+    "pwd",
+    "ls -la /app/ 2>/dev/null || echo '/app not found'",
+    "ls -la . 2>/dev/null",
+    "python3 --version 2>/dev/null; python --version 2>/dev/null",
+    "which gcc g++ make cmake 2>/dev/null || true",
+    "pip3 list 2>/dev/null | head -30 || true",
+    "cat /etc/os-release 2>/dev/null | head -5 || true",
+    "df -h / 2>/dev/null | tail -1 || true",
+    "free -h 2>/dev/null | head -2 || true",
+    "env | grep -iE '^(PATH|HOME|USER|LANG|LC_)' 2>/dev/null || true",
+]
 
 
 class TerminalProfile(BaseProfile):
@@ -55,8 +72,15 @@ CRITICAL RULES:
 - Work FAST. You have limited time. Don't overthink — execute.
 - Read spec.md first for the plan, then execute step by step.
 - If feedback.md exists, read it and fix the issues.
-- After executing, verify your work with a quick check (ls, cat, test command).
 - Do NOT write long explanations. Just execute and verify.
+
+MANDATORY SELF-VERIFICATION (you MUST do this before stopping):
+After completing the task, switch to reviewer mode and verify your work:
+1. Re-read the original task requirements from spec.md.
+2. For each requirement, run a concrete check command (ls, cat, test, diff, grep, etc.)
+3. Ask yourself: "If I were a test script, would this pass?"
+4. If ANY check fails, fix it immediately before stopping.
+Do NOT skip verification. Do NOT just say "it looks good". Run actual commands.
 
 Tools: read_file, write_file, list_files, run_bash.
 """,
@@ -100,11 +124,35 @@ Use write_file to save to feedback.md, then stop.
 
     def format_build_task(self, user_prompt: str, round_num: int,
                           prev_feedback: str, score_history: list[float]) -> str:
-        """Streamlined task prompt — no REFINE/PIVOT overhead for terminal tasks."""
+        """Streamlined task prompt with environment bootstrapping."""
+        # Collect environment info on first round
+        env_section = ""
+        if round_num == 1:
+            import subprocess, config as _cfg
+            env_lines = []
+            for cmd in ENV_BOOTSTRAP_COMMANDS:
+                try:
+                    r = subprocess.run(
+                        cmd, shell=True, cwd=_cfg.WORKSPACE,
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    out = (r.stdout + r.stderr).strip()
+                    if out:
+                        env_lines.append(f"$ {cmd}\n{out}")
+                except Exception:
+                    pass
+            if env_lines:
+                env_section = (
+                    "\n\n--- ENVIRONMENT INFO (pre-collected, do NOT re-run these) ---\n"
+                    + "\n\n".join(env_lines)
+                    + "\n--- END ENVIRONMENT INFO ---\n"
+                )
+
         task = (
             f"Complete this task:\n\n{user_prompt}\n\n"
             f"Read spec.md for the plan. Execute commands with run_bash. "
             f"Verify your work when done."
+            f"{env_section}"
         )
         if prev_feedback:
             task += (
