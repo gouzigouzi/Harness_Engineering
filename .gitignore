@@ -3,3 +3,4 @@ __pycache__/
 workspace/
 *.pyc
 .DS_Store
+jobs/
