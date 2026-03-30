@@ -94,14 +94,19 @@ class Harness:
 
     def run(self, user_prompt: str) -> None:
         # Create a unique project subdirectory under workspace
-        from datetime import datetime
-        slug = re.sub(r'[^a-z0-9]+', '-', user_prompt.lower().strip())[:40].strip('-')
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        project_name = f"{timestamp}_{slug}"
-        project_dir = os.path.join(config.WORKSPACE, project_name)
+        # (skip if HARNESS_FLAT_WORKSPACE is set — used for benchmarks
+        #  where outputs must land directly in the workspace root)
+        if os.environ.get("HARNESS_FLAT_WORKSPACE"):
+            Path(config.WORKSPACE).mkdir(parents=True, exist_ok=True)
+        else:
+            from datetime import datetime
+            slug = re.sub(r'[^a-z0-9]+', '-', user_prompt.lower().strip())[:40].strip('-')
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            project_name = f"{timestamp}_{slug}"
+            project_dir = os.path.join(config.WORKSPACE, project_name)
 
-        config.WORKSPACE = os.path.abspath(project_dir)
-        Path(config.WORKSPACE).mkdir(parents=True, exist_ok=True)
+            config.WORKSPACE = os.path.abspath(project_dir)
+            Path(config.WORKSPACE).mkdir(parents=True, exist_ok=True)
 
         log.info(f"Profile: {self.profile.name()}")
         log.info(f"Project directory: {config.WORKSPACE}")

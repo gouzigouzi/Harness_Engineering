@@ -52,27 +52,29 @@ class HarnessAgent(BaseInstalledAgent):
         self._model_name = model_name
 
     async def install(self, environment: BaseEnvironment) -> None:
-        """Install Python, dependencies, and clone our repo into the container."""
-        # System deps
+        """Install Python, dependencies, and clone our repo into the container.
+
+        Most TB2 prebuilt images already have python3/pip/git.
+        We check first and only install what's missing to save time.
+        """
+        # Only install missing system deps — most TB2 images already have python3
         await self.exec_as_root(
             environment,
-            command="apt-get update -qq && apt-get install -y -qq python3 python3-pip git",
+            command=(
+                "( command -v python3 && command -v pip3 && command -v git ) >/dev/null 2>&1 || "
+                "( apt-get update -qq && apt-get install -y -qq python3 python3-pip git >/dev/null 2>&1 )"
+            ),
         )
 
-        # Clone our repo
+        # Clone repo + install Python deps in one shot
         await self.exec_as_agent(
             environment,
             command=(
                 "git clone --depth 1 "
                 "https://github.com/lazyFrogLOL/Harness_Engineering.git "
-                "/home/user/harness-agent"
+                "/home/user/harness-agent && "
+                "pip3 install --break-system-packages --ignore-installed -q openai tiktoken"
             ),
-        )
-
-        # Install Python deps
-        await self.exec_as_agent(
-            environment,
-            command="pip3 install -q openai tiktoken",
         )
 
     @with_prompt_template
@@ -91,6 +93,11 @@ class HarnessAgent(BaseInstalledAgent):
             val = os.environ.get(key)
             if val:
                 env_vars.append(f"{key}={shlex.quote(val)}")
+
+        # Force workspace to /app so agent writes outputs where tests expect them
+        env_vars.append("HARNESS_WORKSPACE=/app")
+        # Skip subdirectory creation — outputs must land directly in /app
+        env_vars.append("HARNESS_FLAT_WORKSPACE=1")
 
         env_prefix = " ".join(env_vars)
 
