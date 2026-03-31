@@ -52,28 +52,52 @@ class HarnessAgent(BaseInstalledAgent):
         self._model_name = model_name
 
     async def install(self, environment: BaseEnvironment) -> None:
-        """Install Python, dependencies, and clone our repo into the container.
+        """Install dependencies and clone our repo into the container.
 
-        Most TB2 prebuilt images already have python3/pip/git.
-        We check first and only install what's missing to save time.
+        Strategy: avoid apt-get update when possible (slow/blocked on Daytona Tier 2).
+        Most TB2 prebuilt images already have python3 and git.
+        We only need pip for installing openai+tiktoken, and there are
+        fallback paths that don't require apt-get at all.
         """
-        # Only install missing system deps — most TB2 images already have python3
+        # Step 1: Ensure git is available (needed for cloning our repo)
+        # If git is missing, try apt-get with a timeout to avoid hanging
         await self.exec_as_root(
             environment,
             command=(
-                "( command -v python3 && command -v pip3 && command -v git ) >/dev/null 2>&1 || "
-                "( apt-get update -qq && apt-get install -y -qq python3 python3-pip git >/dev/null 2>&1 )"
+                "command -v git >/dev/null 2>&1 || "
+                "( timeout 60 apt-get update -qq 2>/dev/null && "
+                "  timeout 60 apt-get install -y -qq git 2>/dev/null ) || "
+                "true"
             ),
         )
 
-        # Clone repo + install Python deps in one shot
+        # Step 2: Clone repo
         await self.exec_as_agent(
             environment,
             command=(
                 "git clone --depth 1 "
                 "https://github.com/lazyFrogLOL/Harness_Engineering.git "
-                "/home/user/harness-agent && "
-                "pip3 install --break-system-packages --ignore-installed -q openai tiktoken"
+                "/home/user/harness-agent"
+            ),
+        )
+
+        # Step 3: Install Python deps via multiple fallback paths
+        # Try pip3/pip first (already installed in most images),
+        # then python3 -m pip, then ensurepip as last resort.
+        # Each path tries --break-system-packages for PEP 668 compat.
+        await self.exec_as_root(
+            environment,
+            command=(
+                "( pip3 install --break-system-packages -q openai tiktoken 2>/dev/null ) || "
+                "( pip3 install -q openai tiktoken 2>/dev/null ) || "
+                "( pip install --break-system-packages -q openai tiktoken 2>/dev/null ) || "
+                "( python3 -m pip install --break-system-packages -q openai tiktoken 2>/dev/null ) || "
+                "( python3 -m ensurepip --default-pip 2>/dev/null && "
+                "  python3 -m pip install --break-system-packages -q openai tiktoken 2>/dev/null ) || "
+                "( timeout 60 apt-get update -qq 2>/dev/null && "
+                "  timeout 60 apt-get install -y -qq python3-pip 2>/dev/null && "
+                "  pip3 install --break-system-packages -q openai tiktoken 2>/dev/null ) || "
+                "true"
             ),
         )
 
