@@ -65,20 +65,26 @@ class HarnessAgent(BaseInstalledAgent):
         3. Try pip install via multiple fallback paths
         4. Only use apt-get as absolute last resort, with timeout
         """
-        # Step 1: Wait for dpkg lock (verifier setup may be running apt-get concurrently)
-        # Then ensure git is available
+        # Step 1: Ensure python3 and git are available
+        # Some TB2 images (e.g. query-optimize) don't have python3 at all.
+        # Wait for dpkg lock first, then install what's missing.
         await self.exec_as_root(
             environment,
             command=(
-                # Wait up to 60s for dpkg lock to be released
-                "for i in $(seq 1 30); do "
+                # Wait for dpkg lock (verifier may be running apt-get)
+                "for i in $(seq 1 60); do "
                 "  fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break; "
                 "  sleep 2; "
                 "done; "
-                # Ensure git exists
-                "command -v git >/dev/null 2>&1 || "
-                "( apt-get update -qq 2>/dev/null && "
-                "  apt-get install -y -qq git 2>/dev/null ) || "
+                # Build list of missing packages
+                "PKGS=''; "
+                "command -v python3 >/dev/null 2>&1 || PKGS=\"$PKGS python3\"; "
+                "command -v git >/dev/null 2>&1 || PKGS=\"$PKGS git\"; "
+                # Install if anything is missing
+                "if [ -n \"$PKGS\" ]; then "
+                "  apt-get update -qq 2>/dev/null && "
+                "  apt-get install -y -qq $PKGS 2>/dev/null; "
+                "fi; "
                 "true"
             ),
         )
