@@ -120,6 +120,15 @@ class HarnessAgent(BaseInstalledAgent):
                 "    -c conda-forge python=3.12 pip && "
                 f"  {self.MAMBA_ENV}/bin/pip install -q openai && "
                 f"  {self.MAMBA_PYTHON} -c 'import openai; print(\"openai installed via micromamba\")' ) || "
+                # Nuclear: standalone python from GitHub + openai wheel
+                "( echo 'micromamba failed, trying standalone python...' && "
+                "  cd /tmp && "
+                "  curl -sL -o python.tar.zst "
+                "    'https://github.com/astral-sh/python-build-standalone/releases/download/20250604/cpython-3.12.11+20250604-x86_64-unknown-linux-gnu-install_only.tar.gz' && "
+                f"  mkdir -p {self.MAMBA_ROOT} && "
+                f"  tar -xf python.tar.zst -C {self.MAMBA_ROOT} --strip-components=1 && "
+                f"  {self.MAMBA_ROOT}/bin/python3 -m pip install -q openai && "
+                f"  {self.MAMBA_ROOT}/bin/python3 -c 'import openai; print(\"openai installed via standalone python\")' ) || "
                 "true"
             ),
         )
@@ -145,14 +154,15 @@ class HarnessAgent(BaseInstalledAgent):
         env_vars.append("HARNESS_FLAT_WORKSPACE=1")
         env_prefix = " ".join(env_vars)
 
-        # Use micromamba python if system python3 doesn't have openai
+        # Auto-detect which python has openai: system > mamba env > standalone
         await self.exec_as_agent(
             environment,
             command=(
                 f"cd /home/user/harness-agent && "
-                f"PYTHON=$(python3 -c 'import openai' 2>/dev/null "
-                f"  && echo python3 "
-                f"  || echo {self.MAMBA_PYTHON}) && "
+                f"if python3 -c 'import openai' 2>/dev/null; then PYTHON=python3; "
+                f"elif {self.MAMBA_PYTHON} -c 'import openai' 2>/dev/null; then PYTHON={self.MAMBA_PYTHON}; "
+                f"elif {self.MAMBA_ROOT}/bin/python3 -c 'import openai' 2>/dev/null; then PYTHON={self.MAMBA_ROOT}/bin/python3; "
+                f"else echo 'FATAL: no working python with openai found' && exit 1; fi && "
                 f"{env_prefix} "
                 f"$PYTHON harness.py --profile terminal {escaped}"
             ),
