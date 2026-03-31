@@ -43,6 +43,12 @@ class HarnessAgent(BaseInstalledAgent):
     with --profile terminal for each task.
     """
 
+    # micromamba paths — self-contained Python env, no apt-get needed
+    MAMBA_ROOT = "/opt/mamba"
+    MAMBA_BIN = "/opt/mamba/bin/micromamba"
+    MAMBA_ENV = "/opt/mamba/envs/agent"
+    MAMBA_PYTHON = "/opt/mamba/envs/agent/bin/python3"
+
     @staticmethod
     def name() -> str:
         return "harness-agent"
@@ -54,38 +60,24 @@ class HarnessAgent(BaseInstalledAgent):
     async def install(self, environment: BaseEnvironment) -> None:
         """Install dependencies and clone our repo into the container.
 
-        Key challenges in TB2 environments:
-        - Some images lack pip3 (only have python3)
-        - dpkg lock contention with verifier setup scripts
-        - Daytona Tier 2 network restrictions may slow apt-get
+        Strategy (ordered by speed):
+        1. If python3 + pip exist -> use them directly (fastest, ~10s)
+        2. If python3 exists but no pip -> curl wheel install (~15s)
+        3. If no python3 at all -> micromamba install (~30-60s, no apt-get)
 
-        Strategy:
-        1. Wait for any concurrent dpkg operations to finish
-        2. Clone repo (git is available in most images)
-        3. Try pip install via multiple fallback paths
-        4. Only use apt-get as absolute last resort, with timeout
+        micromamba is a single static binary that installs a complete
+        Python environment from conda-forge. No apt-get, no dpkg locks.
         """
-        # Step 1: Ensure python3 and git are available
-        # Some TB2 images (e.g. query-optimize) don't have python3 at all.
-        # Wait for dpkg lock first, then install what's missing.
+        # Step 1: Ensure git is available
         await self.exec_as_root(
             environment,
             command=(
-                # Wait for dpkg lock (verifier may be running apt-get)
-                "for i in $(seq 1 60); do "
-                "  fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break; "
-                "  sleep 2; "
-                "done; "
-                # Build list of missing packages
-                "PKGS=''; "
-                "command -v python3 >/dev/null 2>&1 || PKGS=\"$PKGS python3\"; "
-                "command -v git >/dev/null 2>&1 || PKGS=\"$PKGS git\"; "
-                # Install if anything is missing
-                "if [ -n \"$PKGS\" ]; then "
+                "command -v git >/dev/null 2>&1 || "
+                "( for i in $(seq 1 30); do "
+                "    fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break; sleep 2; "
+                "  done && "
                 "  apt-get update -qq 2>/dev/null && "
-                "  apt-get install -y -qq $PKGS 2>/dev/null; "
-                "fi; "
-                "true"
+                "  apt-get install -y -qq git 2>/dev/null ) || true"
             ),
         )
 
@@ -99,28 +91,35 @@ class HarnessAgent(BaseInstalledAgent):
             ),
         )
 
-        # Step 3: Install openai — the only hard dependency
-        # Strategy: try pip first, then fall back to manual wheel install via curl
-        # openai is pure Python (py3-none-any), so manual install is straightforward
+        # Step 3: Ensure python3 + openai are available
         await self.exec_as_root(
             environment,
             command=(
-                # Check if openai is already importable
+                # Fast path: already works
                 "python3 -c 'import openai' 2>/dev/null || "
-                # Try pip paths
-                "( pip3 install --break-system-packages -q openai 2>/dev/null && "
+                # Medium path: python3 exists, try pip
+                "( command -v python3 >/dev/null 2>&1 && "
+                "  ( pip3 install --break-system-packages -q openai 2>/dev/null || "
+                "    pip install --break-system-packages -q openai 2>/dev/null || "
+                "    python3 -m pip install --break-system-packages -q openai 2>/dev/null ) && "
                 "  python3 -c 'import openai' 2>/dev/null ) || "
-                "( pip install --break-system-packages -q openai 2>/dev/null && "
-                "  python3 -c 'import openai' 2>/dev/null ) || "
-                "( python3 -m pip install --break-system-packages -q openai 2>/dev/null && "
-                "  python3 -c 'import openai' 2>/dev/null ) || "
-                # Nuclear option: download wheel directly and unzip into site-packages
-                "( SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || "
-                "         python3 -c 'import sys; print([p for p in sys.path if \"site-packages\" in p][0])') && "
+                # Medium path: python3 exists but no pip, use curl+unzip
+                "( command -v python3 >/dev/null 2>&1 && "
+                "  SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null) && "
                 "  cd /tmp && "
-                "  curl -sL -o openai.whl 'https://files.pythonhosted.org/packages/2a/9e/5bfa2270f902d5b92ab7d41ce0475b8630572e71e349b2a4996d14bdda93/openai-2.30.0-py3-none-any.whl' && "
+                "  curl -sL -o openai.whl "
+                "'https://files.pythonhosted.org/packages/2a/9e/5bfa2270f902d5b92ab7d41ce0475b8630572e71e349b2a4996d14bdda93/openai-2.30.0-py3-none-any.whl' && "
                 "  python3 -m zipfile -e openai.whl \"$SITE\" && "
-                "  python3 -c 'import openai; print(f\"openai {openai.__version__} installed via wheel\")' ) || "
+                "  python3 -c 'import openai' 2>/dev/null ) || "
+                # Slow path: no python3 at all, use micromamba
+                "( echo 'No python3 found, installing via micromamba...' && "
+                f"  mkdir -p {self.MAMBA_ROOT} && "
+                "  curl -sL https://micro.mamba.pm/api/micromamba/linux-64/latest "
+                f"    | tar -xj -C {self.MAMBA_ROOT} --strip-components=1 bin/micromamba && "
+                f"  {self.MAMBA_BIN} create -y -q -p {self.MAMBA_ENV} "
+                "    -c conda-forge python=3.12 pip && "
+                f"  {self.MAMBA_ENV}/bin/pip install -q openai && "
+                f"  {self.MAMBA_PYTHON} -c 'import openai; print(\"openai installed via micromamba\")' ) || "
                 "true"
             ),
         )
@@ -142,19 +141,20 @@ class HarnessAgent(BaseInstalledAgent):
             if val:
                 env_vars.append(f"{key}={shlex.quote(val)}")
 
-        # Force workspace to /app so agent writes outputs where tests expect them
         env_vars.append("HARNESS_WORKSPACE=/app")
-        # Skip subdirectory creation — outputs must land directly in /app
         env_vars.append("HARNESS_FLAT_WORKSPACE=1")
-
         env_prefix = " ".join(env_vars)
 
+        # Use micromamba python if system python3 doesn't have openai
         await self.exec_as_agent(
             environment,
             command=(
                 f"cd /home/user/harness-agent && "
+                f"PYTHON=$(python3 -c 'import openai' 2>/dev/null "
+                f"  && echo python3 "
+                f"  || echo {self.MAMBA_PYTHON}) && "
                 f"{env_prefix} "
-                f"python3 harness.py --profile terminal {escaped}"
+                f"$PYTHON harness.py --profile terminal {escaped}"
             ),
         )
 
