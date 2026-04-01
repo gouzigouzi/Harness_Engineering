@@ -428,6 +428,39 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for information. Use when you need documentation, examples, or domain knowledge not available locally. Returns titles, URLs, and snippets.",
+            "parameters": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Max results to return (default 5)",
+                        "default": 5,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": "Fetch and read the text content of a web page. Use after web_search to read a specific page in detail.",
+            "parameters": {
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch"},
+                },
+            },
+        },
+    },
 ]
 
 # --- Evaluator-only tools (browser testing) ---
@@ -592,6 +625,91 @@ def _validate_and_fix(name: str, arguments: dict) -> tuple[dict, str | None]:
 
 
 # ---------------------------------------------------------------------------
+# Web search (lightweight, no external deps)
+# ---------------------------------------------------------------------------
+
+def web_search(query: str, max_results: int = 5) -> str:
+    """Search the web using DuckDuckGo and return text results.
+    Uses DDG's lite HTML endpoint — no API key needed, works in any container.
+    """
+    import urllib.request
+    import urllib.parse
+    import re
+    import html as html_mod
+
+    try:
+        encoded = urllib.parse.urlencode({"q": query})
+        url = f"https://lite.duckduckgo.com/lite/?{encoded}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        resp = urllib.request.urlopen(req, timeout=15)
+        raw = resp.read().decode("utf-8", errors="replace")
+
+        # Extract result links (DDG lite uses rel="nofollow" for result links)
+        links = re.findall(
+            r'<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            raw, re.DOTALL
+        )
+
+        # Extract snippets (text in <td> cells that aren't links/navigation)
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', raw, re.DOTALL)
+        snippets = []
+        for cell in cells:
+            text = re.sub(r'<[^>]+>', '', cell).strip()
+            if len(text) > 50 and not text.startswith('http'):
+                snippets.append(text)
+
+        results = []
+        for i, (href, title) in enumerate(links):
+            if i >= max_results:
+                break
+            title = html_mod.unescape(re.sub(r'<[^>]+>', '', title).strip())
+            # Decode DDG redirect URL
+            real_url = href
+            m = re.search(r'uddg=([^&]+)', href)
+            if m:
+                real_url = urllib.parse.unquote(m.group(1))
+            snippet = snippets[i] if i < len(snippets) else ""
+            results.append(f"{i+1}. {title}\n   {real_url}\n   {snippet[:200]}\n")
+
+        if results:
+            return f"Search results for: {query}\n\n" + "\n".join(results)
+
+        return f"No results found for: {query}"
+
+    except Exception as e:
+        return f"[error] Web search failed: {e}"
+
+
+def web_fetch(url: str) -> str:
+    """Fetch the content of a web page and return as text."""
+    import urllib.request
+    import re
+
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        })
+        resp = urllib.request.urlopen(req, timeout=15)
+        html = resp.read().decode("utf-8", errors="replace")
+
+        # Strip HTML tags, keep text
+        text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        if len(text) > 10000:
+            text = text[:10000] + "\n\n[TRUNCATED]"
+
+        return text or "(empty page)"
+
+    except Exception as e:
+        return f"[error] Web fetch failed: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -602,6 +720,8 @@ TOOL_DISPATCH = {
     "list_files": list_files,
     "run_bash": run_bash,
     "delegate_task": delegate_task,
+    "web_search": web_search,
+    "web_fetch": web_fetch,
     "browser_test": browser_test,
     "stop_dev_server": stop_dev_server,
 }
