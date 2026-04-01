@@ -51,8 +51,13 @@ class TraceWriter:
                 "event": event_type,
                 **data,
             }
+            line = json.dumps(entry, ensure_ascii=False)[:10000]
+            # Write to file
             with open(self._path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False)[:10000] + "\n")
+                f.write(line + "\n")
+            # Also print to stderr so Harbor logs capture it
+            import sys
+            print(f"[TRACE] {line}", file=sys.stderr)
         except Exception:
             pass  # never let tracing break the agent
 
