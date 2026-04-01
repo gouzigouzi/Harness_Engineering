@@ -84,6 +84,7 @@ class HarnessAgent(BaseInstalledAgent):
         )
 
         # Step 3: If no python3, install standalone from GitHub
+        # Try curl first, then wget, then apt-get install curl as last resort
         await self.exec_as_root(
             environment,
             command=(
@@ -91,9 +92,13 @@ class HarnessAgent(BaseInstalledAgent):
                 "  echo \"python3 found: $(python3 --version)\"; "
                 "else "
                 "  echo 'No python3, installing standalone from GitHub...' && "
-                "  curl -sL -o /tmp/python.tar.gz "
-                "    'https://github.com/astral-sh/python-build-standalone/releases/"
+                "  URL='https://github.com/astral-sh/python-build-standalone/releases/"
                 "download/20250604/cpython-3.12.11+20250604-x86_64-unknown-linux-gnu-install_only.tar.gz' && "
+                "  ( curl -sL -o /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
+                "    wget -q -O /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
+                "    ( apt-get update -qq 2>/dev/null && apt-get install -y -qq curl 2>/dev/null && "
+                "      curl -sL -o /tmp/python.tar.gz \"$URL\" ) "
+                "  ) && "
                 "  mkdir -p /opt/python && "
                 "  tar -xzf /tmp/python.tar.gz -C /opt/python --strip-components=1 && "
                 "  ln -sf /opt/python/bin/python3 /usr/local/bin/python3 && "
