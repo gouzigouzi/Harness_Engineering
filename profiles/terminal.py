@@ -98,6 +98,11 @@ class TerminalProfile(BaseProfile):
 
     def resolve_task_timeout(self, user_prompt: str) -> float | None:
         """Look up TB2 task timeout by matching task name in prompt or workspace path."""
+        meta = self._lookup_task_meta(user_prompt)
+        return meta.get("agent_timeout_sec") if meta else None
+
+    def _lookup_task_meta(self, user_prompt: str) -> dict | None:
+        """Look up full TB2 task metadata (timeout, difficulty, category)."""
         import config as _cfg
         tasks = self._load_tb2_tasks()
         if not tasks:
@@ -107,7 +112,7 @@ class TerminalProfile(BaseProfile):
         ws_lower = _cfg.WORKSPACE.lower()
         for task_name, meta in tasks.items():
             if task_name in ws_lower:
-                return meta.get("agent_timeout_sec")
+                return meta
 
         # Check user prompt
         prompt_lower = user_prompt.lower()
@@ -117,21 +122,14 @@ class TerminalProfile(BaseProfile):
                 task_name.replace("-", " ") in prompt_lower or
                 task_name.replace("-", "_") in prompt_lower
             ):
-                return meta.get("agent_timeout_sec")
+                return meta
 
         return None
 
     def resolve_time_allocation(self, user_prompt: str) -> dict:
-        """Dynamic time allocation based on TB2 task timeout and difficulty.
-
-        Strategy:
-        - Short tasks (≤900s / 15min): skip planner, minimal evaluator, builder gets ~95%
-        - Medium tasks (900-1800s): light planner, builder gets ~88%
-        - Long tasks (>1800s): planner does discovery, normal evaluator, builder gets ~83%
-        """
-        timeout = self.resolve_task_timeout(user_prompt)
-        if timeout is None:
-            timeout = self._get("task_budget")
+        """Dynamic time allocation based on TB2 task timeout and difficulty."""
+        meta = self._lookup_task_meta(user_prompt)
+        timeout = meta.get("agent_timeout_sec") if meta else self._get("task_budget")
 
         if timeout <= 900:
             # 15 min or less — every second counts
@@ -295,7 +293,7 @@ Use write_file to save to feedback.md, then stop.
 
     def format_build_task(self, user_prompt: str, round_num: int,
                           prev_feedback: str, score_history: list[float]) -> str:
-        """Streamlined task prompt with environment bootstrapping."""
+        """Streamlined task prompt with environment bootstrapping and difficulty-aware hints."""
         env_section = ""
         if round_num == 1:
             import subprocess, config as _cfg
@@ -318,11 +316,45 @@ Use write_file to save to feedback.md, then stop.
                     + "\n--- END ENVIRONMENT INFO ---\n"
                 )
 
+        # Build difficulty-aware strategy hint
+        strategy_hint = ""
+        meta = self._lookup_task_meta(user_prompt)
+        if meta:
+            difficulty = meta.get("difficulty", "unknown")
+            timeout = meta.get("agent_timeout_sec", 900)
+            mins = int(timeout / 60)
+
+            if difficulty == "hard" or timeout >= 1800:
+                strategy_hint = (
+                    f"\n\n--- STRATEGY HINT (time limit: {mins} min, difficulty: {difficulty}) ---\n"
+                    "This is a complex task. Consider breaking it into independent subtasks:\n"
+                    "- Use delegate_task to handle isolated pieces in parallel "
+                    "(e.g. one sub-agent writes a parser, another writes the core logic).\n"
+                    "- Each delegate_task runs in a clean context and returns a summary.\n"
+                    "- Focus on getting a WORKING solution first, then optimize.\n"
+                    "- Don't spend too long on any single approach — if stuck after 3-4 tries, pivot.\n"
+                    "--- END STRATEGY HINT ---\n"
+                )
+            elif difficulty == "easy":
+                strategy_hint = (
+                    f"\n\n--- STRATEGY HINT (time limit: {mins} min, difficulty: {difficulty}) ---\n"
+                    "This is a straightforward task. Execute directly — don't overthink.\n"
+                    "--- END STRATEGY HINT ---\n"
+                )
+            else:
+                strategy_hint = (
+                    f"\n\n--- STRATEGY HINT (time limit: {mins} min, difficulty: {difficulty}) ---\n"
+                    "Work methodically: implement, test, verify. Use delegate_task if "
+                    "the task has clearly separable parts.\n"
+                    "--- END STRATEGY HINT ---\n"
+                )
+
         task = (
             f"Complete this task:\n\n{user_prompt}\n\n"
             f"Read spec.md for the plan. Execute commands with run_bash. "
             f"Verify your work when done."
             f"{env_section}"
+            f"{strategy_hint}"
         )
         if prev_feedback:
             task += (
