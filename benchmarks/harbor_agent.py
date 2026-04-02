@@ -60,26 +60,39 @@ class HarnessAgent(BaseInstalledAgent):
         3. If no python3 → download standalone python from GitHub (~30MB)
         4. Install openai from vendored wheels (fully offline)
         """
-        # Step 1: Ensure git is available (only apt-get we ever do)
+        # Step 1: Get harness code into container
+        # Try git clone first, fall back to curl/wget tarball if no git
         await self.exec_as_root(
             environment,
             command=(
-                "command -v git >/dev/null 2>&1 || "
-                "( for i in $(seq 1 15); do "
-                "    fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break; sleep 2; "
-                "  done && "
-                "  apt-get update -qq 2>/dev/null && "
-                "  apt-get install -y -qq git 2>/dev/null ) || true"
+                # Ensure we have a download tool (curl or wget)
+                # Most images have at least one; if not, install curl
+                "( command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || "
+                "  ( for i in $(seq 1 15); do "
+                "      fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break; sleep 2; "
+                "    done && "
+                "    apt-get update -qq 2>/dev/null && "
+                "    apt-get install -y -qq curl 2>/dev/null ) "
+                ") || true"
             ),
         )
 
-        # Step 2: Clone repo (includes vendor_wheels/)
         await self.exec_as_agent(
             environment,
             command=(
-                "git clone --depth 1 "
-                "https://github.com/lazyFrogLOL/Harness_Engineering.git "
-                "/home/user/harness-agent"
+                "if [ -d /home/user/harness-agent ]; then "
+                "  echo 'harness-agent already exists'; "
+                "elif command -v git >/dev/null 2>&1; then "
+                "  git clone --depth 1 "
+                "    https://github.com/lazyFrogLOL/Harness_Engineering.git "
+                "    /home/user/harness-agent; "
+                "else "
+                "  echo 'No git, downloading tarball...' && "
+                "  mkdir -p /home/user/harness-agent && "
+                "  URL='https://github.com/lazyFrogLOL/Harness_Engineering/archive/refs/heads/master.tar.gz' && "
+                "  ( curl -sL \"$URL\" 2>/dev/null || wget -qO- \"$URL\" 2>/dev/null ) "
+                "    | tar -xz --strip-components=1 -C /home/user/harness-agent; "
+                "fi"
             ),
         )
 
