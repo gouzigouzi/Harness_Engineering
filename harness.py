@@ -332,18 +332,31 @@ def main():
     log.info(f"Base URL: {config.BASE_URL}")
     log.info(f"Workspace: {config.WORKSPACE}")
 
-    # Preflight
+    # Preflight — verify API connection with retries for rate limits
     log.info("Verifying API connection...")
-    try:
-        from agents import get_client
-        resp = get_client().chat.completions.create(
-            model=config.MODEL,
-            messages=[{"role": "user", "content": "Say OK"}],
-            max_tokens=5,
-        )
-        log.info(f"API OK — model responded: {resp.choices[0].message.content}")
-    except Exception as e:
-        log.error(f"API preflight failed: {e}")
+    from agents import get_client
+    preflight_ok = False
+    for attempt in range(5):
+        try:
+            resp = get_client().chat.completions.create(
+                model=config.MODEL,
+                messages=[{"role": "user", "content": "Say OK"}],
+                max_tokens=5,
+            )
+            log.info(f"API OK — model responded: {resp.choices[0].message.content}")
+            preflight_ok = True
+            break
+        except Exception as e:
+            err_str = str(e)
+            if "rate_limit" in err_str or "429" in err_str:
+                wait = 2 ** (attempt + 1)
+                log.warning(f"API rate limited (attempt {attempt+1}/5), waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                log.error(f"API preflight failed: {e}")
+                break
+
+    if not preflight_ok:
         print(f"\nCannot connect to API. Check your .env:\n"
               f"  OPENAI_API_KEY  — is it valid?\n"
               f"  OPENAI_BASE_URL — is {config.BASE_URL} correct?\n"
