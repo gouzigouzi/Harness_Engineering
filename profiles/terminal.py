@@ -134,43 +134,50 @@ class TerminalProfile(BaseProfile):
         return None
 
     def resolve_time_allocation(self, user_prompt: str) -> dict:
-        """Dynamic time allocation based on TB2 task timeout and difficulty."""
+        """Dynamic time allocation based on TB2 task timeout and difficulty.
+
+        Key insight from TB2 leaderboard analysis: top agents (ForgeCode, Letta,
+        Claude Code) are all single-agent architectures. Every second spent on
+        planner/evaluator LLM calls is a second the builder can't use for actual
+        work. For TB2's binary pass/fail verification, the builder's own
+        PreExitVerificationMiddleware + running tests is more effective than
+        a separate evaluator agent.
+
+        Strategy:
+        - <= 900s: Skip both planner and evaluator. Builder gets 100% of time.
+        - <= 1800s: Skip planner. Evaluator only on round 2 if needed.
+        - > 1800s: Keep planner (complex tasks benefit from decomposition).
+                    Evaluator enabled for multi-round correction.
+        """
         meta = self._lookup_task_meta(user_prompt)
         timeout = meta.get("agent_timeout_sec") if meta else self._get("task_budget")
         difficulty = meta.get("difficulty", "medium") if meta else "medium"
 
-        if timeout <= 900 and difficulty != "hard":
-            # Short + not hard: skip planner, builder gets max time
+        if timeout <= 900:
+            # Short tasks: every second counts. Builder only.
+            # PreExitVerificationMiddleware handles verification internally.
             return {
                 "planner": 0.0,
-                "builder": 0.95,
-                "evaluator": 0.05,
+                "builder": 1.0,
+                "evaluator": 0.0,
+                "planner_enabled": False,
+                "evaluator_enabled": False,
+            }
+        elif timeout <= 1800:
+            # Medium tasks: skip planner, builder gets nearly all time.
+            # Keep evaluator enabled for a potential round 2 fix pass.
+            return {
+                "planner": 0.0,
+                "builder": 0.93,
+                "evaluator": 0.07,
                 "planner_enabled": False,
                 "evaluator_enabled": True,
             }
-        elif timeout <= 900 and difficulty == "hard":
-            # Short + hard: keep planner for decomposition, but minimal
-            return {
-                "planner": 0.05,
-                "builder": 0.90,
-                "evaluator": 0.05,
-                "planner_enabled": True,
-                "evaluator_enabled": True,
-            }
-        elif timeout <= 1800:
-            # Medium timeout
-            return {
-                "planner": 0.05,
-                "builder": 0.88,
-                "evaluator": 0.07,
-                "planner_enabled": True,
-                "evaluator_enabled": True,
-            }
         else:
-            # Long timeout — full pipeline
+            # Long tasks (>30 min): planner helps with decomposition.
             return {
-                "planner": 0.07,
-                "builder": 0.83,
+                "planner": 0.05,
+                "builder": 0.85,
                 "evaluator": 0.10,
                 "planner_enabled": True,
                 "evaluator_enabled": True,
