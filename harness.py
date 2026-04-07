@@ -333,28 +333,38 @@ def main():
     log.info(f"Workspace: {config.WORKSPACE}")
 
     # Preflight — verify API connection with retries for rate limits
-    log.info("Verifying API connection...")
-    from agents import get_client
-    preflight_ok = False
-    for attempt in range(5):
-        try:
-            resp = get_client().chat.completions.create(
-                model=config.MODEL,
-                messages=[{"role": "user", "content": "Say OK"}],
-                max_tokens=5,
-            )
-            log.info(f"API OK — model responded: {resp.choices[0].message.content}")
-            preflight_ok = True
-            break
-        except Exception as e:
-            err_str = str(e)
-            if "rate_limit" in err_str or "429" in err_str:
-                wait = 2 ** (attempt + 1)
-                log.warning(f"API rate limited (attempt {attempt+1}/5), waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                log.error(f"API preflight failed: {e}")
+    # Skip in benchmark mode (HARNESS_FLAT_WORKSPACE) to avoid wasting an API
+    # call and hitting rate limits when many containers start simultaneously.
+    if os.environ.get("HARNESS_FLAT_WORKSPACE"):
+        log.info("Benchmark mode — skipping API preflight check.")
+        preflight_ok = True
+    else:
+        log.info("Verifying API connection...")
+        from agents import get_client
+        import random
+        preflight_ok = False
+        for attempt in range(8):
+            try:
+                resp = get_client().chat.completions.create(
+                    model=config.MODEL,
+                    messages=[{"role": "user", "content": "Say OK"}],
+                    max_tokens=5,
+                )
+                log.info(f"API OK — model responded: {resp.choices[0].message.content}")
+                preflight_ok = True
                 break
+            except Exception as e:
+                err_str = str(e)
+                if "rate_limit" in err_str or "429" in err_str:
+                    # Exponential backoff with jitter to avoid thundering herd
+                    base_wait = min(2 ** (attempt + 1), 60)
+                    jitter = random.uniform(0, base_wait * 0.5)
+                    wait = base_wait + jitter
+                    log.warning(f"API rate limited (attempt {attempt+1}/8), waiting {wait:.1f}s...")
+                    time.sleep(wait)
+                else:
+                    log.error(f"API preflight failed: {e}")
+                    break
 
     if not preflight_ok:
         print(f"\nCannot connect to API. Check your .env:\n"

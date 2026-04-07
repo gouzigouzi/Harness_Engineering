@@ -96,15 +96,29 @@ class HarnessAgent(BaseInstalledAgent):
             ),
         )
 
-        # Step 3: If no python3, install standalone from GitHub
-        # Try curl first, then wget, then apt-get install curl as last resort
+        # Step 3: Ensure python3 >= 3.11 (openai + pydantic v2 need it)
+        # Old containers ship Python 3.9/3.10 where import openai crashes
+        # on pydantic v2 or anyio incompatibilities. Check the actual version
+        # and install standalone 3.12 if it's too old or missing entirely.
         await self.exec_as_root(
             environment,
             command=(
+                "NEED_INSTALL=0; "
                 "if command -v python3 >/dev/null 2>&1; then "
-                "  echo \"python3 found: $(python3 --version)\"; "
+                "  PY_VER=$(python3 -c 'import sys; print(sys.version_info[:2])' 2>/dev/null) && "
+                "  PY_MAJOR=$(python3 -c 'import sys; print(sys.version_info[0])' 2>/dev/null) && "
+                "  PY_MINOR=$(python3 -c 'import sys; print(sys.version_info[1])' 2>/dev/null) && "
+                "  echo \"python3 found: $(python3 --version) (parsed: $PY_MAJOR.$PY_MINOR)\" && "
+                "  if [ \"$PY_MAJOR\" -lt 3 ] 2>/dev/null || [ \"$PY_MINOR\" -lt 11 ] 2>/dev/null; then "
+                "    echo \"Python $PY_MAJOR.$PY_MINOR is too old (need >= 3.11), upgrading...\"; "
+                "    NEED_INSTALL=1; "
+                "  fi; "
                 "else "
-                "  echo 'No python3, installing standalone from GitHub...' && "
+                "  echo 'No python3 found'; "
+                "  NEED_INSTALL=1; "
+                "fi; "
+                "if [ \"$NEED_INSTALL\" = \"1\" ]; then "
+                "  echo 'Installing standalone Python 3.12 from GitHub...' && "
                 "  URL='https://github.com/astral-sh/python-build-standalone/releases/"
                 "download/20250604/cpython-3.12.11+20250604-x86_64-unknown-linux-gnu-install_only.tar.gz' && "
                 "  ( curl -sL -o /tmp/python.tar.gz \"$URL\" 2>/dev/null || "
@@ -114,34 +128,49 @@ class HarnessAgent(BaseInstalledAgent):
                 "  ) && "
                 "  mkdir -p /opt/python && "
                 "  tar -xzf /tmp/python.tar.gz -C /opt/python --strip-components=1 && "
+                # Symlink to /usr/local/bin so it shadows the old system python3
                 "  ln -sf /opt/python/bin/python3 /usr/local/bin/python3 && "
                 "  ln -sf /opt/python/bin/pip3 /usr/local/bin/pip3 && "
+                # Also update the bare 'python' command if it exists
+                "  ln -sf /opt/python/bin/python3 /usr/local/bin/python && "
                 "  rm -f /tmp/python.tar.gz && "
-                "  echo \"standalone python installed: $(python3 --version)\"; "
+                # Force hash table refresh so bash picks up the new binary
+                "  hash -r 2>/dev/null; "
+                "  echo \"standalone python installed: $(/usr/local/bin/python3 --version)\"; "
+                "else "
+                "  echo 'Python version OK, no upgrade needed'; "
                 "fi"
             ),
         )
 
         # Step 4: Install openai from vendored wheels (fully offline)
+        # Use /usr/local/bin/python3 explicitly to ensure we target the
+        # correct interpreter (the standalone 3.12 if we just installed it,
+        # not a stale system python that might still be on PATH).
         await self.exec_as_root(
             environment,
             command=(
-                "python3 -c 'import openai' 2>/dev/null || "
+                "PYTHON=$(command -v python3); "
+                # Verify openai actually imports cleanly — a stale install
+                # against an old Python will fail at import time even though
+                # the package directory exists.
+                "$PYTHON -c 'import openai; print(\"openai OK\")' 2>/dev/null || "
                 # Try pip with vendored wheels
-                "( pip3 install --break-system-packages --no-index "
+                "( $PYTHON -m pip install --break-system-packages --no-index --force-reinstall "
                 "  --find-links=/home/user/harness-agent/vendor_wheels "
                 "  openai 2>/dev/null && "
-                "  python3 -c 'import openai' 2>/dev/null ) || "
-                "( python3 -m pip install --break-system-packages --no-index "
+                "  $PYTHON -c 'import openai' 2>/dev/null ) || "
+                "( pip3 install --break-system-packages --no-index --force-reinstall "
                 "  --find-links=/home/user/harness-agent/vendor_wheels "
                 "  openai 2>/dev/null && "
-                "  python3 -c 'import openai' 2>/dev/null ) || "
-                # No pip at all — unzip wheels directly
-                "( SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])') && "
+                "  $PYTHON -c 'import openai' 2>/dev/null ) || "
+                # No pip at all — unzip wheels directly into the new python's site-packages
+                "( SITE=$($PYTHON -c 'import site; print(site.getsitepackages()[0])') && "
+                "  mkdir -p \"$SITE\" && "
                 "  for whl in /home/user/harness-agent/vendor_wheels/*.whl; do "
-                "    python3 -m zipfile -e \"$whl\" \"$SITE\" 2>/dev/null; "
+                "    $PYTHON -m zipfile -e \"$whl\" \"$SITE\" 2>/dev/null; "
                 "  done && "
-                "  python3 -c 'import openai; print(\"openai installed via wheel unzip\")' ) || "
+                "  $PYTHON -c 'import openai; print(\"openai installed via wheel unzip\")' ) || "
                 "echo 'FATAL: failed to install openai'"
             ),
         )

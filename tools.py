@@ -100,15 +100,7 @@ def run_bash(command: str, timeout: int = 300) -> str:
             text=True,
             timeout=timeout,
         )
-        output = (result.stdout + "\n" + result.stderr).strip()
-        if len(output) > 30_000:
-            total = len(output)
-            output = (
-                output[:15_000]
-                + f"\n\n[TRUNCATED] Showing first 15k + last 15k of {total} total characters. "
-                f"The middle {total - 30_000} characters are NOT shown.\n\n"
-                + output[-15_000:]
-            )
+        output = _smart_truncate_output(result.stdout, result.stderr)
         return output or "(no output)"
     except subprocess.TimeoutExpired:
         return (
@@ -118,6 +110,78 @@ def run_bash(command: str, timeout: int = 300) -> str:
         )
     except Exception as e:
         return f"[error] {e}"
+
+
+def _smart_truncate_output(stdout: str, stderr: str, limit: int = 30_000) -> str:
+    """Truncate command output while preserving the most useful information.
+
+    Strategy:
+    - Always keep stderr in full (up to half the budget) — errors live here.
+    - Extract lines containing error/warning keywords from the middle of stdout
+      that would otherwise be lost in a naive head+tail cut.
+    - Use head + important-middle + tail for stdout.
+    """
+    import re
+
+    stderr = (stderr or "").strip()
+    stdout = (stdout or "").strip()
+    combined = (stdout + "\n" + stderr).strip() if stderr else stdout
+
+    if len(combined) <= limit:
+        return combined
+
+    # Reserve up to 40% of budget for stderr, rest for stdout
+    stderr_budget = min(len(stderr), int(limit * 0.4))
+    stdout_budget = limit - stderr_budget
+
+    # Truncate stderr if needed (keep tail — most recent errors matter most)
+    if len(stderr) > stderr_budget:
+        stderr = "...[stderr truncated]\n" + stderr[-(stderr_budget - 30):]
+
+    # Smart-truncate stdout
+    if len(stdout) <= stdout_budget:
+        truncated_stdout = stdout
+    else:
+        # Head and tail get 40% each, important middle lines get 20%
+        head_size = int(stdout_budget * 0.40)
+        tail_size = int(stdout_budget * 0.40)
+        middle_budget = stdout_budget - head_size - tail_size - 200  # 200 for markers
+
+        head = stdout[:head_size]
+        tail = stdout[-tail_size:]
+
+        # Extract important lines from the middle that would be lost
+        middle = stdout[head_size:-tail_size] if tail_size else stdout[head_size:]
+        important_lines = []
+        _error_pattern = re.compile(
+            r'(?i)(error|fail|assert|exception|traceback|warning|not found|denied|refused|fatal)',
+        )
+        if middle and middle_budget > 0:
+            for line in middle.splitlines():
+                if _error_pattern.search(line):
+                    important_lines.append(line)
+
+        important_section = "\n".join(important_lines)
+        if len(important_section) > middle_budget:
+            important_section = important_section[:middle_budget]
+
+        middle_part = ""
+        if important_section:
+            middle_part = (
+                f"\n\n[...{len(middle)} chars omitted — key lines extracted:]\n"
+                + important_section
+                + "\n[...end extracted lines]\n\n"
+            )
+        else:
+            middle_part = (
+                f"\n\n[TRUNCATED — {len(middle)} chars omitted from middle]\n\n"
+            )
+
+        truncated_stdout = head + middle_part + tail
+
+    if stderr:
+        return truncated_stdout + "\n\n--- STDERR ---\n" + stderr
+    return truncated_stdout
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +447,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Execute a shell command in the workspace directory. Use for installing deps, running builds, starting servers, running tests, etc. For long-running commands (compilation, training), increase the timeout parameter.",
+            "description": "Execute a shell command in the workspace directory. Use for installing deps, running builds, starting servers, running tests, etc. For long-running commands (compilation, training), increase the timeout parameter. For background services (VMs, servers), use '... &' and a separate command to check readiness. Stderr is preserved separately in output for easier debugging.",
             "parameters": {
                 "type": "object",
                 "required": ["command"],

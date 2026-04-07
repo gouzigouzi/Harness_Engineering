@@ -15,7 +15,7 @@ them without touching this file:
   PROFILE_TERMINAL_PLANNER_BUDGET=120
   PROFILE_TERMINAL_PASS_THRESHOLD=8.0
   PROFILE_TERMINAL_LOOP_FILE_EDIT_THRESHOLD=4
-  PROFILE_TERMINAL_TIME_WARN_THRESHOLD=0.65
+  PROFILE_TERMINAL_TIME_WARN_THRESHOLD=0.45
 
   # Or via ProfileConfig in code:
   from profiles.base import ProfileConfig
@@ -47,6 +47,13 @@ ENV_BOOTSTRAP_COMMANDS = [
     "df -h / 2>/dev/null | tail -1 || true",
     "free -h 2>/dev/null | head -2 || true",
     "env | grep -iE '^(PATH|HOME|USER|LANG|LC_)' 2>/dev/null || true",
+    # Git context — many tasks involve git repos
+    "git -C /app log --oneline -5 2>/dev/null || true",
+    "git -C /app status --short 2>/dev/null || true",
+    "git -C /app branch -a 2>/dev/null | head -10 || true",
+    # Service detection — tasks may need running services
+    "which qemu-system-x86_64 qemu-system-i386 docker postfix 2>/dev/null || true",
+    "ss -tlnp 2>/dev/null | head -10 || netstat -tlnp 2>/dev/null | head -10 || true",
 ]
 
 
@@ -62,8 +69,8 @@ class TerminalProfile(BaseProfile):
         "loop_file_edit_threshold": 4,
         "loop_command_repeat_threshold": 3,
         "task_tracking_nudge_after": 8,
-        "time_warn_threshold": 0.65,
-        "time_critical_threshold": 0.85,
+        "time_warn_threshold": 0.45,
+        "time_critical_threshold": 0.75,
     }
 
     def _get(self, key: str):
@@ -263,7 +270,25 @@ before retrying. Check which package provides it.
 fundamentally different strategy. Do not keep tweaking the same broken approach.
 - Read error messages carefully — they usually tell you exactly what's wrong.
 
-Tools: read_file, write_file, list_files, run_bash, delegate_task.
+BACKGROUND PROCESSES & SERVICES:
+- Some tasks require starting long-running services (VMs, servers, daemons).
+- Start them in the background: `nohup <cmd> &` or `<cmd> &`
+- Wait for readiness: poll with `sleep 2 && curl ...` or check ports with \
+`ss -tlnp | grep <port>` in a loop.
+- QEMU VMs take time to boot — wait 15-30 seconds after starting before \
+interacting.
+- If a task needs a service running when verification happens, make sure it \
+stays running (don't kill it at the end).
+
+AVAILABLE TOOLS:
+- run_bash: Execute shell commands (your primary tool).
+- write_file / read_file / list_files: File operations in the workspace.
+- delegate_task: Spawn an isolated sub-agent for independent subtasks.
+- web_search: Search the web via DuckDuckGo (for docs, APIs, algorithms).
+- web_fetch: Fetch a specific URL's content as text.
+- read_skill_file: Load a skill guide if one is relevant (see skill catalog below).
+Use the right tool for the job — e.g. web_search for lookup tasks, \
+delegate_task for parallelizable subtasks.
 """,
             middlewares=[
                 LoopDetectionMiddleware(
