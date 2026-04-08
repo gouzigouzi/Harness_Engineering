@@ -289,6 +289,32 @@ class Agent:
 
             # --- If no tool calls, check pre-exit middlewares ---
             if not msg.tool_calls:
+                # Detect "text-only" responses where model describes actions
+                # instead of executing them — common with weaker models
+                if msg.content and iteration <= 3:
+                    content_lower = msg.content.lower()
+                    action_words = ["i will", "i'll", "let me", "first,", "step 1",
+                                    "here's my plan", "i need to", "we need to",
+                                    "the approach", "my strategy"]
+                    is_planning_text = any(w in content_lower for w in action_words)
+                    has_no_prior_tools = not any(
+                        m.get("role") == "tool" for m in messages
+                    )
+                    if is_planning_text and has_no_prior_tools:
+                        log.warning(f"[{self.name}] Model is describing instead of executing. Nudging.")
+                        trace.middleware_inject("agent_loop", "text_only_nudge",
+                                               "Model describing instead of executing")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM] STOP DESCRIBING. START EXECUTING.\n"
+                                "You just wrote a plan/description instead of calling tools. "
+                                "Use run_bash to execute commands NOW. "
+                                "Do not explain what you will do — just DO it."
+                            ),
+                        })
+                        continue
+
                 forced_continue = False
                 for mw in self.middlewares:
                     inject = mw.pre_exit(messages)

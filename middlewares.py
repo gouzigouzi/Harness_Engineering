@@ -118,18 +118,22 @@ class LoopDetectionMiddleware(AgentMiddleware):
             # Also detect rapid-fire failed commands (different commands, same error)
             if "[error]" in result or "command not found" in result.lower():
                 recent_errors = 0
-                for msg in reversed(messages[-8:]):
+                for msg in reversed(messages[-10:]):
                     content = msg.get("content", "")
                     if msg.get("role") == "tool" and (
                         "[error]" in content or "command not found" in content.lower()
+                        or "[exit code:" in content
                     ):
                         recent_errors += 1
                 if recent_errors >= 3:
                     return (
                         "[SYSTEM] Multiple consecutive commands have failed. "
-                        "Stop and diagnose the root cause before trying more commands. "
-                        "Check: Is the required tool installed? Are you in the right directory? "
-                        "Is there a dependency missing?"
+                        "STOP trying variations of the same approach. "
+                        "Diagnose the ROOT CAUSE:\n"
+                        "1. Is the required tool/package installed?\n"
+                        "2. Are you in the right directory? Run `pwd` and `ls -la`.\n"
+                        "3. Is there a dependency missing? Check error messages carefully.\n"
+                        "4. Consider a completely different approach to the problem."
                     )
 
         return None
@@ -172,6 +176,52 @@ class PreExitVerificationMiddleware(AgentMiddleware):
         return False
 
     @staticmethod
+    def _check_workspace_outputs() -> str:
+        """Check what files exist in the workspace and flag potential issues."""
+        import config as _cfg
+        from pathlib import Path
+        import subprocess
+
+        ws = Path(_cfg.WORKSPACE)
+        if not ws.exists():
+            return ""
+
+        issues = []
+
+        # Check for TODO/NotImplementedError in Python files
+        try:
+            result = subprocess.run(
+                "grep -rl 'NotImplementedError\\|raise NotImplemented\\|# TODO\\|pass  # TODO' "
+                "--include='*.py' . 2>/dev/null | head -5",
+                shell=True, cwd=str(ws), capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip():
+                files = result.stdout.strip()
+                issues.append(
+                    f"WARNING: These files still contain TODO/NotImplementedError:\n{files}\n"
+                    "You MUST fill in the implementation before stopping."
+                )
+        except Exception:
+            pass
+
+        # Check for empty key output files
+        try:
+            result = subprocess.run(
+                "find . -maxdepth 2 -name '*.py' -o -name '*.c' -o -name '*.txt' "
+                "-o -name '*.json' -o -name '*.csv' 2>/dev/null | head -20",
+                shell=True, cwd=str(ws), capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip():
+                for f in result.stdout.strip().splitlines():
+                    fp = ws / f.lstrip("./")
+                    if fp.exists() and fp.stat().st_size == 0:
+                        issues.append(f"WARNING: {f} exists but is EMPTY (0 bytes).")
+        except Exception:
+            pass
+
+        return "\n".join(issues)
+
+    @staticmethod
     def _extract_task_requirements(messages: list[dict]) -> str | None:
         """Extract the original task requirements from the conversation."""
         for msg in messages:
@@ -211,6 +261,15 @@ class PreExitVerificationMiddleware(AgentMiddleware):
                 "[SYSTEM] MANDATORY VERIFICATION — You are about to finish, "
                 "but you MUST verify your work first."
             )
+
+            # Auto-check workspace for common issues
+            workspace_issues = self._check_workspace_outputs()
+            if workspace_issues:
+                parts.append(
+                    "\n⚠️ AUTOMATED CHECKS FOUND ISSUES:\n"
+                    f"{workspace_issues}\n"
+                    "You MUST fix these issues before stopping."
+                )
 
             if self._include_task_requirements:
                 task_text = self._extract_task_requirements(messages)
@@ -459,8 +518,92 @@ class TaskTrackingMiddleware(AgentMiddleware):
 
 
 # ---------------------------------------------------------------------------
-# Error Guidance (structured recovery for weak models)
+# Skeleton/Template Detection (prevents ignoring existing TODO files)
 # ---------------------------------------------------------------------------
+
+class SkeletonDetectionMiddleware(AgentMiddleware):
+    """
+    Detects skeleton/template files with TODO markers at the start of work
+    and injects a strong reminder to fill them in rather than create new files.
+
+    This addresses a critical failure mode where models read skeleton files
+    but then create separate implementations instead of filling in the TODOs,
+    causing verifier tests to fail because they import from the original files.
+    """
+
+    def __init__(self):
+        self._checked = False
+        self._skeleton_files: list[str] = []
+
+    def _scan_for_skeletons(self) -> list[tuple[str, list[str]]]:
+        """Scan workspace for files containing TODO/NotImplementedError markers."""
+        import config as _cfg
+        import subprocess
+
+        results = []
+        try:
+            # Find files with TODO markers
+            r = subprocess.run(
+                "grep -rn 'TODO\\|NotImplementedError\\|FIXME\\|PLACEHOLDER\\|FILL IN\\|YOUR CODE HERE' "
+                "--include='*.py' --include='*.c' --include='*.cpp' --include='*.h' "
+                "--include='*.java' --include='*.rs' --include='*.go' --include='*.v' "
+                ". 2>/dev/null | head -30",
+                shell=True, cwd=_cfg.WORKSPACE, capture_output=True, text=True, timeout=10,
+            )
+            if r.stdout.strip():
+                # Group by file
+                file_todos: dict[str, list[str]] = {}
+                for line in r.stdout.strip().splitlines():
+                    parts = line.split(":", 2)
+                    if len(parts) >= 3:
+                        fname = parts[0].lstrip("./")
+                        todo_line = parts[2].strip()
+                        if fname not in file_todos:
+                            file_todos[fname] = []
+                        file_todos[fname].append(todo_line[:100])
+                results = [(f, todos) for f, todos in file_todos.items()]
+        except Exception:
+            pass
+        return results
+
+    def per_iteration(self, iteration: int, messages: list[dict]) -> str | None:
+        # Only check once, early in the agent's work
+        if self._checked or iteration > 3:
+            return None
+
+        # Only trigger after the agent has had a chance to read files
+        # (iteration 2-3 is ideal)
+        if iteration < 2:
+            return None
+
+        self._checked = True
+        skeletons = self._scan_for_skeletons()
+
+        if not skeletons:
+            return None
+
+        self._skeleton_files = [f for f, _ in skeletons]
+        log.warning(f"Skeleton detection: found {len(skeletons)} files with TODOs")
+
+        parts = [
+            "[MANDATORY] SKELETON FILES DETECTED — You MUST fill in these files, "
+            "not create new ones. The test scripts import from these exact files.\n"
+        ]
+        for fname, todos in skeletons[:5]:  # limit to 5 files
+            parts.append(f"  📄 {fname}:")
+            for todo in todos[:3]:
+                parts.append(f"     → {todo}")
+
+        parts.append(
+            "\nACTION REQUIRED: Read each file above, find the TODO/NotImplementedError "
+            "markers, and REPLACE them with working implementations. "
+            "Do NOT create separate files — the tests import from these exact paths."
+        )
+
+        return "\n".join(parts)
+
+
+
 
 class ErrorGuidanceMiddleware(AgentMiddleware):
     """

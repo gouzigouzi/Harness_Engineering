@@ -31,6 +31,7 @@ from middlewares import (
     TimeBudgetMiddleware,
     TaskTrackingMiddleware,
     ErrorGuidanceMiddleware,
+    SkeletonDetectionMiddleware,
 )
 
 # Commands to bootstrap environment awareness at the start of each build.
@@ -66,11 +67,11 @@ class TerminalProfile(BaseProfile):
         "evaluator_budget": 180,
         "pass_threshold": 8.0,
         "max_rounds": 2,
-        "loop_file_edit_threshold": 4,
+        "loop_file_edit_threshold": 3,
         "loop_command_repeat_threshold": 3,
-        "task_tracking_nudge_after": 4,
-        "time_warn_threshold": 0.45,
-        "time_critical_threshold": 0.75,
+        "task_tracking_nudge_after": 5,
+        "time_warn_threshold": 0.40,
+        "time_critical_threshold": 0.70,
     }
 
     def _get(self, key: str):
@@ -164,22 +165,24 @@ class TerminalProfile(BaseProfile):
                 "evaluator_enabled": False,
             }
         elif timeout <= 1800:
-            # Medium tasks: skip planner, builder gets nearly all time.
-            # Keep evaluator enabled for a potential round 2 fix pass.
+            # Medium tasks: skip planner, builder gets all time.
+            # PreExitVerificationMiddleware is more effective than a separate
+            # evaluator for TB2's binary pass/fail verification.
             return {
                 "planner": 0.0,
-                "builder": 0.93,
-                "evaluator": 0.07,
+                "builder": 1.0,
+                "evaluator": 0.0,
                 "planner_enabled": False,
-                "evaluator_enabled": True,
+                "evaluator_enabled": False,
             }
         else:
-            # Long tasks (>30 min): planner helps with decomposition.
+            # Long tasks (>30 min): skip planner still — direct execution is
+            # faster. But keep evaluator for a potential round 2 fix pass.
             return {
-                "planner": 0.05,
-                "builder": 0.85,
+                "planner": 0.0,
+                "builder": 0.90,
                 "evaluator": 0.10,
-                "planner_enabled": True,
+                "planner_enabled": False,
                 "evaluator_enabled": True,
             }
 
@@ -239,75 +242,74 @@ Use write_file to save the plan to spec.md, then stop.
 You are an expert Linux system administrator and developer. \
 Complete the given task by executing shell commands.
 
-NON-INTERACTIVE MODE — you are running autonomously with NO human in the loop:
-- NEVER ask clarifying questions. There is no one to answer them.
-- NEVER say "I need more information" or "please confirm". Just proceed.
-- If requirements are ambiguous, assume the most reasonable interpretation and execute.
-- If you are unsure, try the most likely approach first. You can always fix later.
+## EXECUTION MODE
+You are running AUTONOMOUSLY with NO human. NEVER ask questions. NEVER say \
+"I need more information". Just DO IT. If ambiguous, pick the most reasonable \
+interpretation and execute.
 
-CRITICAL RULES:
-- Your PRIMARY action is run_bash. Execute commands, don't just describe them.
+## MANDATORY WORKFLOW (follow this EXACT order)
+
+### Step 1: DISCOVER (spend ≤10% of your time here)
+- Run `ls -la` to see what files exist in the workspace.
+- Read any existing code files, READMEs, Makefiles, or skeleton files.
+- Identify: What EXACTLY must be produced? What files, what format, what behavior?
+- If skeleton/template files exist with TODO markers, you MUST fill them in.
+
+### Step 2: IDENTIFY OUTPUT CONTRACT
+Before writing ANY code, state to yourself:
+- What files must exist when I'm done? (exact paths)
+- What must each file contain or do?
+- How will automated tests verify my work?
+This is the MOST IMPORTANT step. Getting the output contract wrong = guaranteed failure.
+
+### Step 3: BUILD
+- Your PRIMARY tool is run_bash. Execute commands, don't describe them.
 - If you finish without running any commands, you have FAILED.
-- Work FAST. You have limited time. Don't overthink — execute.
-- Read spec.md first for the plan, then execute step by step.
-- If feedback.md exists, read it and fix the issues.
-- Do NOT write long explanations. Just execute and verify.
+- For code tasks: write code with write_file, then BUILD and TEST it with run_bash.
+- For skeleton/template tasks: READ the existing files FIRST, then MODIFY them \
+to fill in the TODO sections. Do NOT create new files that duplicate existing ones.
+- NEVER leave TODO, FIXME, NotImplementedError, or placeholder code in output files.
 
-TESTABILITY — your work will be verified by automated test scripts:
+### Step 4: VERIFY (mandatory before stopping)
+- Run the SAME commands the test script would run.
+- Check that ALL required output files exist: `ls -la <expected_file>`
+- Check file contents match spec: `cat <file>` or `head -20 <file>`
+- If the task has a test/benchmark script, RUN IT: `python3 benchmark.py` etc.
+
+## CRITICAL RULES
 - Follow task specifications LITERALLY — exact file names, exact output \
 formats, exact paths. Do not improvise or rename things.
-- If the task says "write output to result.txt", it means exactly result.txt, \
-not results.txt or output.txt.
-- If the task specifies a particular format, match it character-for-character.
+- If the task says "write output to result.txt", it means EXACTLY result.txt.
+- If the task specifies a format, match it character-for-character.
+- If skeleton files exist with TODO markers, FILL THEM IN. Do not create \
+separate files that ignore the skeleton structure.
 - Think: "If a test script checks for this, would it pass?"
 
-PROBLEM-SOLVING STRATEGY:
-1. Plan & Discover: Read spec.md, scan the codebase, understand the task.
-2. Research first: If the task involves an unfamiliar domain (cryptography, \
-bioinformatics, specific protocols, niche file formats), use web_search \
-BEFORE writing code. Look for reference implementations, algorithms, or \
-libraries. 5 minutes of research can save 10 minutes of dead-end coding.
-3. Track: For multi-step tasks, create _todo.md with a checklist of all steps. \
-Mark steps [x] as you complete them. Update it as you go. This file survives \
-context resets and keeps you from losing track of what's done and what remains.
-4. Build: Implement step by step. For steps marked [DELEGATE] in spec.md, \
-use delegate_task to run them in isolated sub-agents. Example:
-   delegate_task(task="Write a BPE tokenizer in C, save to tokenizer.c", role="module_writer")
-4. Verify: Run tests, read FULL output, compare against task spec (not your code).
-5. Fix: If anything fails, re-read the original spec and fix.
+## WHEN THINGS GO WRONG
+- Command not found → install it: `apt-get update && apt-get install -y <pkg>` \
+or `pip install <pkg>`.
+- Command times out → retry with larger timeout parameter.
+- Approach failing after 2 attempts → STOP. Re-read the error. Try a \
+COMPLETELY DIFFERENT strategy. Do NOT keep tweaking the same broken approach.
+- Read error messages carefully — they tell you exactly what's wrong.
+- For unfamiliar domains → use web_search BEFORE coding. 5 min of research \
+saves 10 min of dead-end coding.
 
-WHEN THINGS GO WRONG:
-- If a command is not found: install it (apt-get install, pip install, etc.) \
-before retrying. Check which package provides it.
-- If a command times out: retry with a larger timeout parameter.
-- If your approach isn't working after 2 attempts: STOP immediately. \
-Do NOT keep tweaking the same broken approach. Step back, re-read the error, \
-and try a fundamentally different strategy. Time is your scarcest resource.
-- Read error messages carefully — they usually tell you exactly what's wrong.
-- If you're stuck on a domain-specific problem, use web_search to find \
-how others have solved similar problems.
+## BACKGROUND PROCESSES & SERVICES
+- Start in background: `nohup <cmd> &` or `<cmd> &`
+- Wait for readiness: poll with `sleep 2 && curl ...` or `ss -tlnp | grep <port>`
+- QEMU VMs need 15-30 seconds to boot before interacting.
+- If a task needs a service running during verification, keep it running.
 
-BACKGROUND PROCESSES & SERVICES:
-- Some tasks require starting long-running services (VMs, servers, daemons).
-- Start them in the background: `nohup <cmd> &` or `<cmd> &`
-- Wait for readiness: poll with `sleep 2 && curl ...` or check ports with \
-`ss -tlnp | grep <port>` in a loop.
-- QEMU VMs take time to boot — wait 15-30 seconds after starting before \
-interacting.
-- If a task needs a service running when verification happens, make sure it \
-stays running (don't kill it at the end).
-
-AVAILABLE TOOLS:
-- run_bash: Execute shell commands (your primary tool).
-- write_file / read_file / list_files: File operations in the workspace.
-- delegate_task: Spawn an isolated sub-agent for independent subtasks.
-- web_search: Search the web via DuckDuckGo (for docs, APIs, algorithms).
-- web_fetch: Fetch a specific URL's content as text.
-- read_skill_file: Load a skill guide if one is relevant (see skill catalog below).
-Use the right tool for the job — e.g. web_search for lookup tasks, \
-delegate_task for parallelizable subtasks.
+## AVAILABLE TOOLS
+- run_bash: Execute shell commands (your PRIMARY tool).
+- write_file / read_file / list_files: File operations.
+- delegate_task: Spawn isolated sub-agent for independent subtasks.
+- web_search / web_fetch: Search web for docs, algorithms, examples.
+- read_skill_file: Load a skill guide if relevant (see catalog below).
 """,
             middlewares=[
+                SkeletonDetectionMiddleware(),
                 LoopDetectionMiddleware(
                     file_edit_threshold=self._get("loop_file_edit_threshold"),
                     command_repeat_threshold=self._get("loop_command_repeat_threshold"),
@@ -318,15 +320,16 @@ delegate_task for parallelizable subtasks.
                 ),
                 PreExitVerificationMiddleware(
                     verification_prompt=(
-                        "Switch to REVIEWER mode. Forget what you think you did — "
-                        "check what ACTUALLY exists on disk.\n"
-                        "Go through the requirements above ONE BY ONE:\n"
-                        "1. For each requirement, run a concrete check command "
-                        "(cat the output file, ls -la, diff, grep, python3 -c, etc.)\n"
-                        "2. Compare ACTUAL file contents against what the task asked for.\n"
-                        "3. Pay special attention to: column orders in CSVs, edge directions, "
-                        "exact file paths, numeric formats, and any conditional rules.\n"
-                        "4. If ANY check fails, fix it BEFORE stopping."
+                        "STOP. Switch to REVIEWER mode. Forget what you think you did.\n\n"
+                        "Run these checks IN ORDER:\n"
+                        "1. `ls -la` — verify ALL required output files exist.\n"
+                        "2. For each required file, `cat <file>` or `head -30 <file>` — "
+                        "verify it has real content (not empty, not placeholder).\n"
+                        "3. `grep -r 'TODO\\|NotImplementedError\\|FIXME' *.py *.c 2>/dev/null` — "
+                        "if ANY match, you MUST fix them.\n"
+                        "4. If the task has a test/benchmark script, RUN IT NOW.\n"
+                        "5. Compare ACTUAL output against what the task asked for.\n"
+                        "6. If ANY check fails, fix it BEFORE stopping."
                     ),
                     include_task_requirements=True,
                 ),
@@ -408,43 +411,41 @@ Use write_file to save to feedback.md, then stop.
         if meta:
             difficulty = meta.get("difficulty", "unknown")
             timeout = meta.get("agent_timeout_sec", 900)
-            # Estimate actual builder time: total timeout minus setup/planner/evaluator overhead
             alloc = self.resolve_time_allocation(user_prompt)
             builder_time = int(timeout * alloc.get("builder", 0.85) / 60)
             total_mins = int(timeout / 60)
 
             if difficulty == "hard" or timeout >= 1800:
                 strategy_hint = (
-                    f"\n\n--- STRATEGY HINT (total timeout: {total_mins} min, "
-                    f"your budget: ~{builder_time} min, difficulty: {difficulty}) ---\n"
-                    "This is a complex task. Consider breaking it into independent subtasks:\n"
-                    "- Use delegate_task to handle isolated pieces in parallel "
-                    "(e.g. one sub-agent writes a parser, another writes the core logic).\n"
-                    "- Each delegate_task runs in a clean context and returns a summary.\n"
-                    "- Focus on getting a WORKING solution first, then optimize.\n"
-                    "- Don't spend too long on any single approach — if stuck after 3-4 tries, pivot.\n"
-                    "--- END STRATEGY HINT ---\n"
+                    f"\n\n--- TIME BUDGET: ~{builder_time} min (difficulty: {difficulty}) ---\n"
+                    "Complex task. Break into independent subtasks if possible. "
+                    "Use delegate_task for isolated pieces. "
+                    "Get a WORKING solution first, then optimize. "
+                    "If stuck after 3 tries, pivot to a different approach.\n"
+                    "--- END ---\n"
                 )
             elif difficulty == "easy":
                 strategy_hint = (
-                    f"\n\n--- STRATEGY HINT (your budget: ~{builder_time} min, "
-                    f"difficulty: {difficulty}) ---\n"
-                    "This is a straightforward task. Execute directly — don't overthink.\n"
-                    "--- END STRATEGY HINT ---\n"
+                    f"\n\n--- TIME BUDGET: ~{builder_time} min (difficulty: {difficulty}) ---\n"
+                    "Straightforward task. Execute directly — don't overthink.\n"
+                    "--- END ---\n"
                 )
             else:
                 strategy_hint = (
-                    f"\n\n--- STRATEGY HINT (total timeout: {total_mins} min, "
-                    f"your budget: ~{builder_time} min, difficulty: {difficulty}) ---\n"
-                    "Work methodically: implement, test, verify. Use delegate_task if "
-                    "the task has clearly separable parts.\n"
-                    "--- END STRATEGY HINT ---\n"
+                    f"\n\n--- TIME BUDGET: ~{builder_time} min (difficulty: {difficulty}) ---\n"
+                    "Work methodically: implement, test, verify.\n"
+                    "--- END ---\n"
                 )
 
+        # Direct task injection — no need to read spec.md for TB2 tasks
         task = (
-            f"Complete this task:\n\n{user_prompt}\n\n"
-            f"Read spec.md for the plan. Execute commands with run_bash. "
-            f"Verify your work when done."
+            f"## YOUR TASK\n\n{user_prompt}\n\n"
+            f"## INSTRUCTIONS\n"
+            f"1. First run `ls -la` to see what files already exist in the workspace.\n"
+            f"2. Read any existing code files — look for TODO markers or skeleton code.\n"
+            f"3. If skeleton files exist, FILL THEM IN. Do not create separate files.\n"
+            f"4. Implement the solution using run_bash and write_file.\n"
+            f"5. Test your work before stopping."
             f"{env_section}"
             f"{strategy_hint}"
         )
@@ -456,8 +457,9 @@ Use write_file to save to feedback.md, then stop.
 
         if prev_feedback:
             task += (
-                f"\n\nYour previous attempt had issues. "
-                f"Read feedback.md and fix them. Be precise."
+                f"\n\n## PREVIOUS ATTEMPT FAILED\n"
+                f"Read feedback.md and fix the issues. Here's a summary:\n"
+                f"{prev_feedback[:2000]}"
             )
         return task
 

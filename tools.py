@@ -101,6 +101,9 @@ def run_bash(command: str, timeout: int = 300) -> str:
             timeout=timeout,
         )
         output = _smart_truncate_output(result.stdout, result.stderr)
+        # Prepend exit code for non-zero returns — helps weak models detect failures
+        if result.returncode != 0:
+            output = f"[exit code: {result.returncode}]\n{output}"
         return output or "(no output)"
     except subprocess.TimeoutExpired:
         return (

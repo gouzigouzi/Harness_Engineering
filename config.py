@@ -43,7 +43,7 @@ MAX_HARNESS_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "5"))
 PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 
 # --- Agent limits ---
-MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "60"))
+MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "80"))
 MAX_TOOL_ERRORS = 5           # consecutive tool errors before abort
 
 # --- Paths ---
