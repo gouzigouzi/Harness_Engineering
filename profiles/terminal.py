@@ -303,7 +303,11 @@ saves 10 min of dead-end coding.
 
 ## AVAILABLE TOOLS
 - run_bash: Execute shell commands (your PRIMARY tool).
-- write_file / read_file / list_files: File operations.
+- write_file / edit_file / read_file / list_files: File operations.
+  - edit_file: PREFERRED for modifying existing files (old_string → new_string replacement).
+  - write_file: For creating NEW files or complete rewrites.
+  - IMPORTANT: For skeleton/template files with TODO markers, use edit_file to replace \
+the TODO block with your implementation. Do NOT rewrite the entire file with write_file.
 - delegate_task: Spawn isolated sub-agent for independent subtasks.
 - web_search / web_fetch: Search web for docs, algorithms, examples.
 - read_skill_file: Load a skill guide if relevant (see catalog below).

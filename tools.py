@@ -75,6 +75,46 @@ def write_file(path: str, content: str) -> str:
     return f"Wrote {len(content)} chars to {path}"
 
 
+def edit_file(path: str, old_string: str, new_string: str) -> str:
+    """Replace an exact string in a file. For modifying existing files — only sends the diff."""
+    p = _resolve(path)
+    if not p.exists():
+        if old_string == "":
+            # Creating a new file
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(new_string, encoding="utf-8")
+            return f"Created new file {path} ({len(new_string)} chars)"
+        return f"[error] File not found: {path}"
+
+    content = p.read_text(encoding="utf-8", errors="replace")
+
+    if old_string not in content:
+        # Try to find a close match and report
+        lines_with_match = []
+        for i, line in enumerate(content.splitlines(), 1):
+            if old_string[:40] in line or (len(old_string) > 10 and old_string[:20] in line):
+                lines_with_match.append(f"  line {i}: {line.strip()[:100]}")
+        hint = ""
+        if lines_with_match:
+            hint = "\nPartial matches found:\n" + "\n".join(lines_with_match[:3])
+        return (
+            f"[error] old_string not found in {path}. "
+            f"Make sure it matches EXACTLY (including whitespace/indentation).{hint}"
+        )
+
+    count = content.count(old_string)
+    if count > 1:
+        return (
+            f"[error] old_string appears {count} times in {path}. "
+            f"Provide more surrounding context to make it unique, "
+            f"or use write_file to replace the entire file."
+        )
+
+    new_content = content.replace(old_string, new_string, 1)
+    p.write_text(new_content, encoding="utf-8")
+    return f"Edited {path}: replaced {len(old_string)} chars with {len(new_string)} chars"
+
+
 def list_files(directory: str = ".") -> str:
     p = _resolve(directory)
     if not p.is_dir():
@@ -390,7 +430,15 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file in the workspace.",
+            "description": (
+                "Read the contents of a file in the workspace. "
+                "Returns the full file content (up to 60K chars). "
+                "For very large files, use run_bash with head/tail/sed to read specific portions.\n\n"
+                "Usage:\n"
+                "- Use this to understand existing code before modifying it.\n"
+                "- ALWAYS read a file before editing it with edit_file or write_file.\n"
+                "- For binary files, use run_bash with appropriate tools (xxd, file, etc.)."
+            ),
             "parameters": {
                 "type": "object",
                 "required": ["path"],
@@ -417,8 +465,52 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "edit_file",
+            "description": (
+                "Make a targeted edit to an existing file by replacing an exact string match. "
+                "This is the PREFERRED tool for modifying existing files — it only changes "
+                "the specific part you target, leaving the rest untouched.\n\n"
+                "Usage:\n"
+                "- You MUST read the file first with read_file before editing.\n"
+                "- old_string must match EXACTLY one location in the file (including whitespace and indentation).\n"
+                "- If old_string matches multiple locations, the edit will fail. Add more surrounding "
+                "context to make it unique.\n"
+                "- To create a new file, use old_string=\"\" and put the full content in new_string.\n"
+                "- PREFER this over write_file for modifying existing files — it's safer and uses less tokens.\n"
+                "- This is especially useful for filling in TODO/skeleton code: read the file, find the "
+                "TODO block, and replace it with your implementation."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["path", "old_string", "new_string"],
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path to the file to edit"},
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact string to find and replace. Must match exactly one location in the file. Use empty string to create a new file.",
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The replacement string.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_file",
-            "description": "Create or overwrite a file in the workspace.",
+            "description": (
+                "Create a new file or completely overwrite an existing file. "
+                "For modifying existing files, PREFER edit_file instead — it only sends the diff "
+                "and is less error-prone.\n\n"
+                "Usage:\n"
+                "- Use this to create NEW files that don't exist yet.\n"
+                "- Use this for complete rewrites where edit_file would be impractical.\n"
+                "- IMPORTANT: If skeleton/template files already exist with TODO markers, "
+                "use edit_file to fill in the TODOs instead of rewriting the entire file."
+            ),
             "parameters": {
                 "type": "object",
                 "required": ["path", "content"],
@@ -433,7 +525,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List all files in a directory recursively.",
+            "description": "List all files in a directory recursively. Returns up to 200 file paths.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -450,7 +542,24 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Execute a shell command in the workspace directory. Use for installing deps, running builds, starting servers, running tests, etc. For long-running commands (compilation, training), increase the timeout parameter. For background services (VMs, servers), use '... &' and a separate command to check readiness. Stderr is preserved separately in output for easier debugging.",
+            "description": (
+                "Execute a shell command in the workspace directory. This is your PRIMARY tool "
+                "for getting things done.\n\n"
+                "Usage:\n"
+                "- Use for: installing packages, compiling code, running tests, starting services, "
+                "checking system state, and any command-line operation.\n"
+                "- The working directory is the workspace root. Use relative paths or cd as needed.\n"
+                "- For long-running commands (compilation, training), increase the timeout parameter.\n"
+                "- For background services (VMs, servers), use '... &' and a separate command to check readiness.\n"
+                "- Stderr is preserved separately in output for easier debugging.\n"
+                "- Non-zero exit codes are shown as [exit code: N] at the top of output.\n\n"
+                "IMPORTANT: Avoid using run_bash for operations that have dedicated tools:\n"
+                "- Reading files: use read_file (NOT cat/head/tail)\n"
+                "- Writing files: use write_file or edit_file (NOT echo/cat/sed)\n"
+                "- Listing files: use list_files (NOT find/ls for simple listing)\n"
+                "Use run_bash for these ONLY when the dedicated tool cannot accomplish the task "
+                "(e.g., complex pipelines, binary file operations, or commands that need shell features)."
+            ),
             "parameters": {
                 "type": "object",
                 "required": ["command"],
@@ -688,6 +797,22 @@ def _validate_and_fix(name: str, arguments: dict) -> tuple[dict, str | None]:
                     warning = f"[auto-fix] Converted absolute path '{directory}' to relative '{arguments['directory']}'"
                     break
 
+    elif name == "edit_file":
+        path = arguments.get("path", "")
+        # Absolute path → relative
+        if path.startswith("/"):
+            for prefix in ["/app/", "/home/user/", "/workspace/"]:
+                if path.startswith(prefix):
+                    arguments["path"] = path[len(prefix):]
+                    warning = f"[auto-fix] Converted absolute path '{path}' to relative '{arguments['path']}'"
+                    break
+        # Missing required fields
+        if "old_string" not in arguments:
+            arguments["old_string"] = ""
+            warning = "[auto-fix] Missing 'old_string' — treating as new file creation."
+        if "new_string" not in arguments:
+            return arguments, "[auto-fix] Missing 'new_string'. You must specify the replacement text."
+
     return arguments, warning
 
 
@@ -784,6 +909,7 @@ TOOL_DISPATCH = {
     "read_file": read_file,
     "read_skill_file": read_skill_file,
     "write_file": write_file,
+    "edit_file": edit_file,
     "list_files": list_files,
     "run_bash": run_bash,
     "delegate_task": delegate_task,
