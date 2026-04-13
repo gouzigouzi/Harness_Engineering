@@ -43,7 +43,11 @@ MAX_HARNESS_ROUNDS = int(os.environ.get("MAX_HARNESS_ROUNDS", "5"))
 PASS_THRESHOLD = float(os.environ.get("PASS_THRESHOLD", "7.0"))
 
 # --- Agent limits ---
-MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "80"))
+# NOTE: Do NOT use iteration count as the primary stop condition.
+# With ~8-9s per iteration, 80 iterations = ~700s, which silently
+# truncates 900s+ tasks. Use a high ceiling here; TimeBudgetMiddleware
+# handles the real time-based stop.
+MAX_AGENT_ITERATIONS = int(os.environ.get("MAX_AGENT_ITERATIONS", "500"))
 MAX_TOOL_ERRORS = 5           # consecutive tool errors before abort
 
 # --- Paths ---
