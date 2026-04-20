@@ -29,32 +29,18 @@ from middlewares import (
     LoopDetectionMiddleware,
     PreExitVerificationMiddleware,
     TimeBudgetMiddleware,
-    TaskTrackingMiddleware,
     ErrorGuidanceMiddleware,
     SkeletonDetectionMiddleware,
 )
+import tools as _tools
 
 # Commands to bootstrap environment awareness at the start of each build.
-# Output is injected as context so the model doesn't waste time exploring.
+# Minimal set — every extra command costs time and context tokens.
 ENV_BOOTSTRAP_COMMANDS = [
-    "uname -a",
-    "pwd",
-    "ls -la /app/ 2>/dev/null || echo '/app not found'",
-    "ls -la . 2>/dev/null",
-    "python3 --version 2>/dev/null; python --version 2>/dev/null",
-    "which gcc g++ make cmake 2>/dev/null || true",
-    "pip3 list 2>/dev/null | head -30 || true",
-    "cat /etc/os-release 2>/dev/null | head -5 || true",
-    "df -h / 2>/dev/null | tail -1 || true",
-    "free -h 2>/dev/null | head -2 || true",
-    "env | grep -iE '^(PATH|HOME|USER|LANG|LC_)' 2>/dev/null || true",
-    # Git context — many tasks involve git repos
-    "git -C /app log --oneline -5 2>/dev/null || true",
-    "git -C /app status --short 2>/dev/null || true",
-    "git -C /app branch -a 2>/dev/null | head -10 || true",
-    # Service detection — tasks may need running services
-    "which qemu-system-x86_64 qemu-system-i386 docker postfix 2>/dev/null || true",
-    "ss -tlnp 2>/dev/null | head -10 || netstat -tlnp 2>/dev/null | head -10 || true",
+    "uname -m && cat /etc/os-release 2>/dev/null | head -2 || true",
+    "pwd && ls -la",
+    "python3 --version 2>/dev/null; which gcc g++ make 2>/dev/null || true",
+    "git -C /app log --oneline -3 2>/dev/null; git -C /app status --short 2>/dev/null || true",
 ]
 
 
@@ -70,8 +56,8 @@ class TerminalProfile(BaseProfile):
         "loop_file_edit_threshold": 3,
         "loop_command_repeat_threshold": 3,
         "task_tracking_nudge_after": 5,
-        "time_warn_threshold": 0.55,
-        "time_critical_threshold": 0.85,
+        "time_warn_threshold": 0.45,
+        "time_critical_threshold": 0.75,
     }
 
     def _get(self, key: str):
@@ -242,56 +228,36 @@ Use write_file to save the plan to spec.md, then stop.
 You are an expert Linux system administrator and developer. \
 Complete the given task by executing shell commands.
 
-# Execution mode
-You are running AUTONOMOUSLY with NO human. NEVER ask questions. NEVER say \
-"I need more information". Just DO IT. If ambiguous, pick the most reasonable \
-interpretation and execute.
+# CRITICAL RULES
+- You are AUTONOMOUS. NEVER ask questions. NEVER explain what you will do. Just DO IT.
+- TIME IS YOUR SCARCEST RESOURCE. Every second of thinking/explaining is wasted.
+- Be CONCISE in your text responses. 1-2 sentences max between tool calls.
+- Call MULTIPLE tools in parallel when operations are independent.
+- NEVER repeat a failed command without changing something. After 2 failures, pivot strategy.
 
 # Doing tasks
-- Do not propose changes to code you haven't read. Read existing files before modifying.
-- Do not create files unless absolutely necessary. Prefer editing existing files.
-- If an approach fails, diagnose WHY before switching tactics — read the error, \
-check your assumptions, try a focused fix. Don't retry the identical action blindly, \
-but don't abandon a viable approach after a single failure either.
-- If your approach isn't working after 2-3 attempts, STOP and try a fundamentally \
-different strategy. Time is your scarcest resource.
-- Follow task specifications LITERALLY — exact file names, exact output formats, \
-exact paths. Do not improvise or rename things.
-- If skeleton/template files exist with TODO markers, FILL THEM IN. Do not create \
-separate files that ignore the skeleton structure.
-- NEVER leave TODO, FIXME, NotImplementedError, or placeholder code in output files.
-- When working with tool results, note down any important information you might \
-need later, as earlier tool results may be compressed from context.
+- Read existing files BEFORE modifying. Look for TODO/skeleton markers.
+- If skeleton files exist, FILL THEM IN. Do NOT create separate files.
+- Follow task specs LITERALLY — exact file names, output formats, paths.
+- NEVER leave TODO, FIXME, NotImplementedError, or placeholder code.
+- If stuck > 2 attempts, try a fundamentally different approach immediately.
 
-# Using your tools
-- run_bash: Your PRIMARY tool. Use for installing packages, compiling, testing, \
-checking system state, and any shell operation.
-- read_file: Read files BEFORE modifying them. Do NOT use cat/head/tail via run_bash \
-for reading files — use read_file instead.
-- write_file: Create new files or overwrite existing ones. Do NOT use echo/cat heredoc \
-via run_bash — use write_file instead.
-- edit_file: PREFERRED for modifying existing files — replaces a specific string, \
-leaving the rest untouched. Ideal for filling in TODO/skeleton code.
-- list_files: List directory contents. Do NOT use find/ls via run_bash for simple listing.
-- delegate_task: Spawn isolated sub-agent for independent subtasks that would bloat context.
-- web_search / web_fetch: Research unfamiliar domains BEFORE coding.
-- read_skill_file: Load a skill guide if one matches your task (see catalog below).
-- For long-running commands (compilation, training), increase the timeout parameter.
-- For background services, use '... &' and poll for readiness.
-- You can call MULTIPLE tools in a single response. If operations are independent \
-(e.g. read two files, install a package AND read a file), issue all tool calls at \
-once — do NOT wait for one to finish before starting the next.
-
-When working with tool results, briefly note key information (file paths, error \
-messages, important values) in your text response — older tool results may be \
-cleared from context later.
+# Tools
+- run_bash: PRIMARY tool. For packages, compiling, testing, system ops.
+- read_file: Read files before modifying. NOT cat/head via bash.
+- write_file: Create/overwrite files. NOT echo/heredoc via bash.
+- edit_file: Modify existing files (preferred over write_file for edits).
+- list_files: Directory listing.
+- For long builds/training, set timeout=600 or higher.
+- For background services, use '... &' and poll readiness.
 
 # Workflow
-1. DISCOVER: Run `ls -la` to see what exists. Read existing code files.
-2. IDENTIFY what must be produced (exact file paths, formats, behavior).
-3. BUILD: Execute commands. Write code. Test it.
-4. VERIFY: Check all output files exist and have correct content before stopping.
+1. `ls -la` → see what exists. Read existing code.
+2. Identify exact outputs needed (paths, formats).
+3. Build and test.
+4. Verify all outputs exist and are correct before stopping.
 """,
+            tool_schemas=_tools.TB2_TOOL_SCHEMAS,
             middlewares=[
                 SkeletonDetectionMiddleware(),
                 LoopDetectionMiddleware(
@@ -299,21 +265,11 @@ cleared from context later.
                     command_repeat_threshold=self._get("loop_command_repeat_threshold"),
                 ),
                 ErrorGuidanceMiddleware(),
-                TaskTrackingMiddleware(
-                    nudge_after_n_tools=self._get("task_tracking_nudge_after"),
-                ),
                 PreExitVerificationMiddleware(
                     verification_prompt=(
-                        "STOP. Switch to REVIEWER mode. Forget what you think you did.\n\n"
-                        "Run these checks IN ORDER:\n"
-                        "1. `ls -la` — verify ALL required output files exist.\n"
-                        "2. For each required file, `cat <file>` or `head -30 <file>` — "
-                        "verify it has real content (not empty, not placeholder).\n"
-                        "3. `grep -r 'TODO\\|NotImplementedError\\|FIXME' *.py *.c 2>/dev/null` — "
-                        "if ANY match, you MUST fix them.\n"
-                        "4. If the task has a test/benchmark script, RUN IT NOW.\n"
-                        "5. Compare ACTUAL output against what the task asked for.\n"
-                        "6. If ANY check fails, fix it BEFORE stopping."
+                        "VERIFY NOW: Run `ls -la` and check output files exist with real content. "
+                        "Run `grep -r 'TODO\\|NotImplementedError' *.py *.c 2>/dev/null` — fix any matches. "
+                        "Run the test/benchmark script if one exists. Fix failures before stopping."
                     ),
                     include_task_requirements=True,
                 ),
@@ -366,7 +322,7 @@ Use write_file to save to feedback.md, then stop.
 
     def format_build_task(self, user_prompt: str, round_num: int,
                           prev_feedback: str, score_history: list[float]) -> str:
-        """Streamlined task prompt with environment bootstrapping and difficulty-aware hints."""
+        """Streamlined task prompt — minimal overhead, maximum signal."""
         env_section = ""
         if round_num == 1:
             import subprocess, config as _cfg
@@ -384,54 +340,25 @@ Use write_file to save to feedback.md, then stop.
                     pass
             if env_lines:
                 env_section = (
-                    "\n\n--- ENVIRONMENT INFO (pre-collected, do NOT re-run these) ---\n"
-                    + "\n\n".join(env_lines)
-                    + "\n--- END ENVIRONMENT INFO ---\n"
+                    "\n\n--- ENV ---\n"
+                    + "\n".join(env_lines)
+                    + "\n--- END ENV ---\n"
                 )
 
-        # Build difficulty-aware strategy hint
-        strategy_hint = ""
+        # Minimal time hint
         meta = self._lookup_task_meta(user_prompt)
+        time_hint = ""
         if meta:
-            difficulty = meta.get("difficulty", "unknown")
             timeout = meta.get("agent_timeout_sec", 900)
-            alloc = self.resolve_time_allocation(user_prompt)
-            builder_time = int(timeout * alloc.get("builder", 0.85) / 60)
-            total_mins = int(timeout / 60)
+            time_hint = f"\n[Time budget: {int(timeout/60)} min]"
 
-            if difficulty == "hard" or timeout >= 1800:
-                strategy_hint = (
-                    f"\n\n--- TIME BUDGET: ~{builder_time} min (difficulty: {difficulty}) ---\n"
-                    "Complex task. Break into independent subtasks if possible. "
-                    "Use delegate_task for isolated pieces. "
-                    "Get a WORKING solution first, then optimize. "
-                    "If stuck after 3 tries, pivot to a different approach.\n"
-                    "--- END ---\n"
-                )
-            elif difficulty == "easy":
-                strategy_hint = (
-                    f"\n\n--- TIME BUDGET: ~{builder_time} min (difficulty: {difficulty}) ---\n"
-                    "Straightforward task. Execute directly — don't overthink.\n"
-                    "--- END ---\n"
-                )
-            else:
-                strategy_hint = (
-                    f"\n\n--- TIME BUDGET: ~{builder_time} min (difficulty: {difficulty}) ---\n"
-                    "Work methodically: implement, test, verify.\n"
-                    "--- END ---\n"
-                )
-
-        # Direct task injection — no need to read spec.md for TB2 tasks
+        # Direct task injection
         task = (
-            f"## YOUR TASK\n\n{user_prompt}\n\n"
-            f"## INSTRUCTIONS\n"
-            f"1. First run `ls -la` to see what files already exist in the workspace.\n"
-            f"2. Read any existing code files — look for TODO markers or skeleton code.\n"
-            f"3. If skeleton files exist, FILL THEM IN. Do not create separate files.\n"
-            f"4. Implement the solution using run_bash and write_file.\n"
-            f"5. Test your work before stopping."
-            f"{env_section}"
-            f"{strategy_hint}"
+            f"TASK: {user_prompt}\n"
+            f"{time_hint}"
+            f"{env_section}\n"
+            f"Start with `ls -la`. Read existing files. Fill in skeletons if present. "
+            f"Implement, test, verify."
         )
 
         # Auto-inject matching skill content (if any)
@@ -441,9 +368,7 @@ Use write_file to save to feedback.md, then stop.
 
         if prev_feedback:
             task += (
-                f"\n\n## PREVIOUS ATTEMPT FAILED\n"
-                f"Read feedback.md and fix the issues. Here's a summary:\n"
-                f"{prev_feedback[:2000]}"
+                f"\n\nPREVIOUS ATTEMPT FAILED:\n{prev_feedback[:1500]}"
             )
         return task
 

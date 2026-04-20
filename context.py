@@ -136,7 +136,7 @@ def compact_messages(messages: list[dict], llm_call, role: str = "default") -> l
         return messages
 
     # Role-specific retention ratios
-    retention = {"evaluator": 0.50, "builder": 0.20}.get(role, 0.30)
+    retention = {"evaluator": 0.50, "builder": 0.15}.get(role, 0.25)
 
     system = [messages[0]] if messages[0].get("role") == "system" else []
     non_system = messages[len(system):]

@@ -78,6 +78,7 @@ class Harness:
         self.builder = Agent(
             "builder", builder_cfg.system_prompt + skill_catalog,
             use_tools=True, extra_tool_schemas=builder_cfg.extra_tool_schemas,
+            tool_schemas=builder_cfg.tool_schemas,
             middlewares=builder_cfg.middlewares, time_budget=builder_cfg.time_budget,
         )
 

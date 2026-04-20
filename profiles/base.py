@@ -31,6 +31,7 @@ class AgentConfig:
     """Configuration for a single agent role."""
     system_prompt: str
     extra_tool_schemas: list[dict] = field(default_factory=list)
+    tool_schemas: list[dict] | None = None  # None = use default TOOL_SCHEMAS
     enabled: bool = True
     middlewares: list = field(default_factory=list)  # list[AgentMiddleware]
     time_budget: float | None = None  # seconds; None = no limit

@@ -343,8 +343,8 @@ class TimeBudgetMiddleware(AgentMiddleware):
                 self._critical = True
                 log.warning("Time budget EXPIRED")
                 return (
-                    "[SYSTEM] ⚠️ TIME IS UP. You have exceeded the time budget.\n"
-                    "STOP immediately. Save whatever you have and finish NOW."
+                    "[SYSTEM] ⚠️ TIME IS UP. "
+                    "Submit your current work NOW. Do not start anything new."
                 )
             return None
 
@@ -353,12 +353,8 @@ class TimeBudgetMiddleware(AgentMiddleware):
             mins_left = remaining / 60
             log.warning(f"Time budget critical: {mins_left:.1f} min remaining")
             return (
-                f"[SYSTEM] ⚠️ CRITICAL: Only {mins_left:.1f} minutes remaining out of "
-                f"{self.budget_seconds / 60:.0f} min budget.\n"
-                "STOP building new features. Immediately:\n"
-                "1. Verify what you've done so far works correctly.\n"
-                "2. Run final checks against the task requirements.\n"
-                "3. Fix any broken items — do NOT start anything new."
+                f"[SYSTEM] ⚠️ CRITICAL: Only {mins_left:.0f} min left. "
+                "STOP building. Verify outputs exist and are correct. Fix only critical bugs."
             )
 
         if fraction >= self.warn_threshold and not self._warned:
@@ -366,9 +362,8 @@ class TimeBudgetMiddleware(AgentMiddleware):
             mins_left = remaining / 60
             log.info(f"Time budget warning: {mins_left:.1f} min remaining")
             return (
-                f"[SYSTEM] Time check: {mins_left:.1f} minutes remaining out of "
-                f"{self.budget_seconds / 60:.0f} min budget. "
-                "Start wrapping up your current work and plan for verification."
+                f"[SYSTEM] {mins_left:.0f} min remaining. "
+                "Wrap up current work. Start testing and verification soon."
             )
 
         return None

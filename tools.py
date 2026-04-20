@@ -42,13 +42,12 @@ def read_file(path: str) -> str:
     if not p.exists():
         return f"[error] File not found: {path}"
     content = p.read_text(encoding="utf-8", errors="replace")
-    limit = 60_000
+    limit = 40_000
     if len(content) > limit:
         total = len(content)
         content = content[:limit] + (
-            f"\n\n[TRUNCATED] You are seeing {limit} of {total} total characters. "
-            f"The remaining {total - limit} characters are NOT shown above. "
-            f"You MUST use run_bash with head/tail/sed to read the rest if needed."
+            f"\n\n[TRUNCATED] Showing {limit} of {total} chars. "
+            f"Use run_bash with head/tail/sed to read the rest."
         )
     return content
 
@@ -129,7 +128,7 @@ def list_files(directory: str = ".") -> str:
     return "\n".join(entries[:200])
 
 
-def run_bash(command: str, timeout: int = 300) -> str:
+def run_bash(command: str, timeout: int = 120) -> str:
     """Run a shell command inside the workspace. Returns stdout+stderr."""
     try:
         result = subprocess.run(
@@ -155,7 +154,7 @@ def run_bash(command: str, timeout: int = 300) -> str:
         return f"[error] {e}"
 
 
-def _smart_truncate_output(stdout: str, stderr: str, limit: int = 30_000) -> str:
+def _smart_truncate_output(stdout: str, stderr: str, limit: int = 20_000) -> str:
     """Truncate command output while preserving the most useful information.
 
     Strategy:
@@ -498,8 +497,8 @@ TOOL_SCHEMAS = [
                     "command": {"type": "string", "description": "Shell command to run"},
                     "timeout": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default 300). Increase for long builds.",
-                        "default": 300,
+                        "description": "Timeout in seconds (default 120). Increase for long builds/training.",
+                        "default": 120,
                     },
                 },
             },
@@ -556,6 +555,94 @@ TOOL_SCHEMAS = [
                 "required": ["url"],
                 "properties": {
                     "url": {"type": "string", "description": "URL to fetch"},
+                },
+            },
+        },
+    },
+]
+
+# --- Minimal tool set for TB2 (no network, no sub-agents) ---
+# Removes web_search, web_fetch, delegate_task, read_skill_file
+# Fewer tools = smaller prompt = faster API calls = more iterations per task
+
+TB2_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file from the workspace.",
+            "parameters": {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path inside workspace"}
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create or overwrite a file in the workspace.",
+            "parameters": {
+                "type": "object",
+                "required": ["path", "content"],
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path inside workspace"},
+                    "content": {"type": "string", "description": "File content to write"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace an exact string in a file. Preferred for modifying existing files.",
+            "parameters": {
+                "type": "object",
+                "required": ["path", "old_string", "new_string"],
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path inside workspace"},
+                    "old_string": {"type": "string", "description": "Exact string to find (must be unique)"},
+                    "new_string": {"type": "string", "description": "Replacement string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List all files in a directory recursively.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory": {
+                        "type": "string",
+                        "description": "Relative directory path (default: root)",
+                        "default": ".",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_bash",
+            "description": "Execute a shell command in the workspace directory.",
+            "parameters": {
+                "type": "object",
+                "required": ["command"],
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run"},
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default 120). Increase for long builds/training.",
+                        "default": 120,
+                    },
                 },
             },
         },

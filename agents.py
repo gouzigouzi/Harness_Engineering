@@ -160,12 +160,14 @@ class Agent:
 
     def __init__(self, name: str, system_prompt: str, use_tools: bool = True,
                  extra_tool_schemas: list[dict] | None = None,
+                 tool_schemas: list[dict] | None = None,
                  middlewares: list | None = None,
                  time_budget: float | None = None):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
         self.extra_tool_schemas = extra_tool_schemas or []
+        self.tool_schemas = tool_schemas  # None = use default TOOL_SCHEMAS
         self.middlewares = middlewares or []  # list[AgentMiddleware]
         self.time_budget = time_budget
 
@@ -216,15 +218,17 @@ class Agent:
             kwargs = dict(
                 model=config.MODEL,
                 messages=messages,
-                max_tokens=16384,
+                max_tokens=8192,
             )
             if self.use_tools:
-                kwargs["tools"] = tools.TOOL_SCHEMAS + self.extra_tool_schemas
+                base_schemas = self.tool_schemas if self.tool_schemas is not None else tools.TOOL_SCHEMAS
+                kwargs["tools"] = base_schemas + self.extra_tool_schemas
                 kwargs["tool_choice"] = "auto"
-                # Enable parallel tool calls — the model can issue multiple
-                # independent tool calls in a single response. This is the
-                # single biggest throughput win from Claude Code's architecture.
-                kwargs["parallel_tool_calls"] = True
+                # Parallel tool calls: only enable for models known to handle it well.
+                # Weaker models produce malformed parallel calls that waste time.
+                # Controlled via config; default OFF for safety.
+                if config.ENABLE_PARALLEL_TOOL_CALLS:
+                    kwargs["parallel_tool_calls"] = True
 
             try:
                 response = client.chat.completions.create(**kwargs)
@@ -295,11 +299,12 @@ class Agent:
             if not msg.tool_calls:
                 # Detect "text-only" responses where model describes actions
                 # instead of executing them — common with weaker models
-                if msg.content and iteration <= 3:
+                if msg.content and iteration <= 5:
                     content_lower = msg.content.lower()
                     action_words = ["i will", "i'll", "let me", "first,", "step 1",
                                     "here's my plan", "i need to", "we need to",
-                                    "the approach", "my strategy"]
+                                    "the approach", "my strategy", "i can",
+                                    "we can", "let's", "i would", "i should"]
                     is_planning_text = any(w in content_lower for w in action_words)
                     has_no_prior_tools = not any(
                         m.get("role") == "tool" for m in messages
@@ -311,10 +316,8 @@ class Agent:
                         messages.append({
                             "role": "user",
                             "content": (
-                                "[SYSTEM] STOP DESCRIBING. START EXECUTING.\n"
-                                "You just wrote a plan/description instead of calling tools. "
-                                "Use run_bash to execute commands NOW. "
-                                "Do not explain what you will do — just DO it."
+                                "[SYSTEM] STOP TALKING. USE TOOLS NOW.\n"
+                                "Call run_bash or write_file immediately. No more text."
                             ),
                         })
                         continue
