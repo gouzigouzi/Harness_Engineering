@@ -245,6 +245,33 @@ class Agent:
                     # Don't increment consecutive_errors — rate limits are transient
                     continue
 
+                # JSON parse failures (common with weak/quantized models generating
+                # long tool call arguments that get truncated mid-string).
+                # The inference server returns 500 because the JSON is incomplete.
+                # Don't count toward abort threshold — nudge the model to split work.
+                err_lower = err_str.lower()
+                if ("parse" in err_lower and "json" in err_lower) or \
+                   ("invalid" in err_lower and ("string" in err_lower or "json" in err_lower)):
+                    log.warning(f"[{self.name}] 🔧 JSON parse error from server — nudging model to split output")
+                    trace.error("json_parse_recovery", err_str[:300])
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[SYSTEM] Your last tool call FAILED because the arguments were too long "
+                            "and the JSON was truncated mid-string. The server could not parse it.\n\n"
+                            "YOU MUST split large files into smaller parts:\n"
+                            "1. Write the HTML structure first (no inline CSS/JS beyond basics)\n"
+                            "2. Write CSS in a separate .css file\n"
+                            "3. Write JS in a separate .js file\n"
+                            "4. Or use multiple write_file calls for sections of the same file, "
+                            "using edit_file to append content after the initial skeleton.\n\n"
+                            "NEVER put an entire application in a single write_file call. "
+                            "Keep each write_file content under 200 lines."
+                        ),
+                    })
+                    time.sleep(1)
+                    continue
+
                 log.error(f"[{self.name}] API error: {e}")
                 consecutive_errors += 1
                 if consecutive_errors >= config.MAX_TOOL_ERRORS:

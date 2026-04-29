@@ -50,6 +50,12 @@ Technical guidelines:
 - For web apps: prefer a single HTML file with embedded CSS/JS, unless the spec requires a framework.
 - If a framework is needed, use React+Vite.
 - Make the UI polished — follow the design direction in the spec.
+- IMPORTANT: Keep each write_file call under 200 lines. For larger files, split the work:
+  1. Write the HTML skeleton first (basic structure, no heavy inline CSS/JS).
+  2. Put CSS in a separate .css file and link it.
+  3. Put JS in a separate .js file and reference it with <script src="...">.
+  4. Or write the skeleton first, then use edit_file to add sections incrementally.
+  Never put an entire application (HTML + all CSS + all JS) in a single write_file call.
 
 You have these tools: read_file, write_file, list_files, run_bash, read_skill_file, delegate_task.
 Work inside the current directory. All files you create will persist.
